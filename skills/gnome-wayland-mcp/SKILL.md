@@ -16,8 +16,8 @@ Use the registered `gnome-wayland-mcp` server for this workflow. It controls app
 ## Interact and verify
 
 - Use `mouse_click` with `{"point":{"frame_id":"…","x":320,"y":140}}` to focus or activate a visible target. `mouse_move` takes the point directly. `mouse_scroll` takes `point` plus `vertical` or `horizontal` wheel steps. Each pointer action needs the latest `frame_id`. A new capture, app launch, or input invalidates earlier IDs.
-- Focus an editable field before calling `type_text` with `{"text":"Hello"}`. This pastes UTF-8 using the private clipboard. Use `press_key` for actual key events and shortcuts, for example `{"key":"s","modifiers":["ctrl"]}` or `{"key":"Enter"}`.
-- A `dispatched` response confirms delivery to Mutter. Capture again to verify the app's response before sending a dependent action, especially before submitting immediately after a paste. If a frame is stale, capture again and choose the point from the new image. If an input may have been partially delivered, inspect the current app state before retrying.
+- Focus an editable field before calling `type_text` with `{"text":"Hello"}`. This pastes UTF-8 using the private clipboard. When the `type_text` schema offers `paste_shortcut` and the app uses Ctrl+Shift+V, pass `"paste_shortcut":"ctrl_shift_v"`. Use `press_key` for actual key events and shortcuts, for example `{"key":"s","modifiers":["ctrl"]}` or `{"key":"Enter"}`.
+- A `dispatched` response confirms delivery to Mutter. After a paste, capture again and verify that the app inserted the text before pressing Enter or sending another `type_text` call. If a frame is stale, capture again and choose the point from the new image. If an input may have been partially delivered, inspect the current app state before retrying.
 
 ## Finish
 

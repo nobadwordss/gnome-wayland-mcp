@@ -153,12 +153,46 @@ def exercise(client, report):
     client.call("mouse_click", {"point": point(frame, 490, 138)})
     client.call("press_key", {"key": "a"})
     poll(lambda: snapshot(report), lambda state: state.get("text") == "a", "GTK received key a")
-    literal = "\ud55c\uae00 \ud14c\uc2a4\ud2b8 · café 🌱"
-    client.call("type_text", {"text": literal})
-    poll(lambda: snapshot(report), lambda state: state.get("text") == "a" + literal, "GTK received Unicode paste")
-    client.call("type_text", {"text": " / \uc0c8 \ud14d\uc2a4\ud2b8"})
-    poll(lambda: snapshot(report), lambda state: state.get("text") == "a" + literal + " / \uc0c8 \ud14d\uc2a4\ud2b8",
-         "GTK received the replacement private clipboard selection")
+    literal = "\ud55c\uae00 \ud14c\uc2a4\ud2b8 · café 🌱\n"
+    expected = "a"
+    for index, options in enumerate(({}, {"paste_shortcut": "ctrl_v"}, {"paste_shortcut": None}), 1):
+        client.call("type_text", {"text": literal, **options})
+        expected += literal
+        poll(lambda: snapshot(report),
+             lambda state: state.get("ctrl_pastes") == index and state.get("text") == expected,
+             "GTK received exactly one Ctrl+V and the multiline Unicode text")
+    assert snapshot(report)["shift_pastes"] == 0
+
+    frame = client.call("screenshot")
+    client.call("type_text", {"text": "unexpected", "paste_shortcut": "invalid"}, error="unknown variant")
+    client.call("mouse_move", point(frame, 490, 138))
+    client.call("press_key", {"key": "v", "modifiers": ["ctrl"]})
+    expected += literal
+    poll(lambda: snapshot(report),
+         lambda state: state.get("ctrl_pastes") == 4 and state.get("text") == expected,
+         "GTK can still paste the original private clipboard after rejected arguments")
+
+    shifted = {"text": literal, "paste_shortcut": "ctrl_shift_v"}
+    client.call("type_text", shifted)
+    expected += literal
+    poll(lambda: snapshot(report),
+         lambda state: state.get("shift_pastes") == 1 and state.get("text") == expected,
+         "GTK received exactly one Ctrl+Shift+V and pasted the repeated text")
+    assert snapshot(report)["ctrl_pastes"] == 4
+    client.call("press_key", {"key": "x"})
+    expected += "x"
+    poll(lambda: snapshot(report), lambda state: state.get("text") == expected,
+         "Ctrl and Shift were released after paste")
+
+    client.call("press_key", {"key": "F6"})
+    poll(lambda: snapshot(report), lambda state: state.get("paste_deferred"), "GTK deferred the next paste")
+    assert client.call("type_text", shifted)["status"] == "dispatched"
+    client.call("press_key", {"key": "Enter"})
+    paste_result = poll(lambda: snapshot(report),
+                        lambda state: state.get("shift_pastes") == 2 and state.get("text") == expected + literal,
+                        "GTK inserted the second shifted paste after Enter")
+    assert paste_result["text_at_enter"] == expected
+    assert paste_result["ctrl_pastes"] == 4
     client.call("press_key", {"key": "a", "modifiers": ["ctrl"]})
     client.call("press_key", {"key": "Backspace"})
     poll(lambda: snapshot(report), lambda state: state.get("text") == "", "GTK received Ctrl+A and Backspace")
@@ -194,7 +228,7 @@ def main():
                 raise
             finally:
                 client.close()
-    print("Passed: MCP, private sockets, PNG, pointer, click, scroll, keys, Unicode, stale frame, stop/restart, SIGTERM")
+    print("Passed: MCP, private sockets, PNG, pointer, click, scroll, keys, paste shortcuts and async insertion, stale frame, stop/restart, SIGTERM")
 
 
 if __name__ == "__main__":

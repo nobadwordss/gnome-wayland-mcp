@@ -96,7 +96,7 @@ enum Modifier {
 }
 
 impl Modifier {
-    fn evdev(self) -> u32 {
+    const fn evdev(self) -> u32 {
         match self {
             Self::Ctrl => 29,
             Self::Alt => 56,
@@ -116,11 +116,21 @@ struct Key {
     modifiers: Vec<Modifier>,
 }
 
+#[derive(Clone, Copy, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum PasteShortcut {
+    #[default]
+    CtrlV,
+    CtrlShiftV,
+}
+
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct Text {
     /// UTF-8 text to paste (1 to 16,384 bytes, no NUL characters).
     text: String,
+    /// Paste shortcut supported by the focused app. Omit or pass null for Ctrl+V.
+    paste_shortcut: Option<PasteShortcut>,
 }
 
 enum Action {
@@ -251,7 +261,7 @@ impl Server {
     }
 
     #[tool(
-        description = "Paste literal UTF-8 text into an already focused private text field using the private clipboard.",
+        description = "Paste literal UTF-8 text into a focused field using the private clipboard. Verify insertion with a fresh screenshot before pressing Enter or pasting again.",
         annotations(open_world_hint = false)
     )]
     async fn type_text(&self, Parameters(text): Parameters<Text>) -> CallToolResult {
@@ -362,14 +372,21 @@ impl State {
                 desktop.frame = None;
                 dispatched(desktop.mutter.key(keysym, &modifiers).await)
             }
-            Action::Paste(Text { text }) => {
+            Action::Paste(Text {
+                text,
+                paste_shortcut,
+            }) => {
                 ensure!(
                     (1..=16_384).contains(&text.len()) && !text.contains('\0'),
                     "text must be 1 to 16,384 UTF-8 bytes without NUL characters"
                 );
                 let desktop = ready(&mut self.desktop)?;
                 desktop.frame = None;
-                dispatched(desktop.mutter.paste(text).await)
+                let modifiers: &[u32] = match paste_shortcut.unwrap_or_default() {
+                    PasteShortcut::CtrlV => &[Modifier::Ctrl.evdev()],
+                    PasteShortcut::CtrlShiftV => &[Modifier::Ctrl.evdev(), Modifier::Shift.evdev()],
+                };
+                dispatched(desktop.mutter.paste(text, modifiers).await)
             }
         }
     }

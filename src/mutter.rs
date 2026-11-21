@@ -32,7 +32,12 @@ pub(crate) struct Mutter {
     stream_path: OwnedObjectPath,
     pub node: u32,
     clipboard_enabled: bool,
-    clipboard_task: Option<JoinHandle<()>>,
+    clipboard_task: Option<ClipboardTask>,
+}
+
+struct ClipboardTask {
+    stop: oneshot::Sender<()>,
+    task: JoinHandle<()>,
 }
 
 impl Mutter {
@@ -188,7 +193,17 @@ impl Mutter {
         self.key(0xffe1, &[]).await // Shift_L
     }
 
-    pub async fn paste(&mut self, text: String) -> Result<()> {
+    pub async fn paste(&mut self, text: String, modifiers: &[u32]) -> Result<()> {
+        self.paste_with_timeout(text, modifiers, PASTE_TIMEOUT)
+            .await
+    }
+
+    async fn paste_with_timeout(
+        &mut self,
+        text: String,
+        modifiers: &[u32],
+        timeout: Duration,
+    ) -> Result<()> {
         self.stop_clipboard_task().await;
         let clipboard = Proxy::new_owned(
             self.connection.clone(),
@@ -197,35 +212,67 @@ impl Mutter {
             CLIPBOARD,
         )
         .await?;
-        let mut transfers = clipboard.receive_signal("SelectionTransfer").await?;
         let paste = async {
-            if !self.clipboard_enabled {
-                let options: HashMap<&str, Value<'_>> = HashMap::new();
-                clipboard.call::<_, _, ()>("Enable", &(options,)).await.context("enable private clipboard")?;
+            let options: HashMap<&str, Value<'_>> = HashMap::new();
+            if self.clipboard_enabled {
+                // Retire the old source before subscribing. A late signal emitted
+                // for it during replacement has no source ID to match against.
+                clipboard
+                    .call::<_, _, ()>("SetSelection", &(options,))
+                    .await
+                    .context("clear the previous private clipboard source")?;
+            } else {
+                clipboard
+                    .call::<_, _, ()>("Enable", &(options,))
+                    .await
+                    .context("enable private clipboard")?;
                 self.clipboard_enabled = true;
             }
+
+            let mut transfers = clipboard.receive_signal("SelectionTransfer").await?;
             let mime_types = HashMap::from([("mime-types", Value::from(TEXT_MIME_TYPES.to_vec()))]);
-            clipboard.call::<_, _, ()>("SetSelection", &(mime_types,)).await.context("set private clipboard text")?;
-            let (done, first_transfer) = oneshot::channel();
-            self.clipboard_task = Some(tokio::spawn(async move {
-                let mut done = Some(done);
-                while let Some(message) = transfers.next().await {
-                    let result = transfer_text(&clipboard, &message, text.as_bytes()).await;
-                    if let Some(sender) = done.take() {
-                        let _ = sender.send(result);
+            clipboard
+                .call::<_, _, ()>("SetSelection", &(mime_types,))
+                .await
+                .context("set private clipboard text")?;
+
+            let clipboard = clipboard.clone();
+            let (stop, mut stopping) = oneshot::channel();
+            let (started, first_request) = oneshot::channel();
+            let (finished, first_completion) = oneshot::channel();
+            let task = tokio::spawn(async move {
+                let mut first = Some((started, finished));
+                while let Some(message) = tokio::select! {
+                    biased;
+                    _ = &mut stopping => None,
+                    message = transfers.next() => message,
+                } {
+                    let completion = first.take().map(|(started, finished)| {
+                        let _ = started.send(());
+                        finished
+                    });
+                    let transfer = transfer_text(&clipboard, &message, text.as_bytes(), timeout).await;
+                    if let Some(completion) = completion {
+                        let _ = completion.send(transfer);
                     }
                 }
-            }));
-            self.key(u32::from('v'), &[29]).await?;
-            time::timeout(PASTE_TIMEOUT, first_transfer).await
-                .context("the focused application did not request a clipboard paste; focus an editable field")?
-                .context("Mutter closed the clipboard channel")?
-        }.await;
+            });
+            self.clipboard_task = Some(ClipboardTask { stop, task });
+
+            // Resolve v in the active layout and hold Shift explicitly for the shifted chord.
+            self.key(u32::from('v'), modifiers).await?;
+            time::timeout(timeout, first_request)
+                .await
+                .context("no private clipboard transfer arrived in time. Check the private desktop before retrying")?
+                .context("Mutter closed the clipboard channel")?;
+            // The write has its own deadline. Wait for its completion notice
+            // without cancelling it. A cache request cannot confirm insertion.
+            first_completion.await.context("Mutter closed the clipboard channel")?
+        }
+        .await;
         if paste.is_err() {
             self.stop_clipboard_task().await;
-            if self.clipboard_enabled
-                && let Ok(clipboard) = self.clipboard_proxy().await
-            {
+            if self.clipboard_enabled {
                 let disabled = clipboard.call::<_, _, ()>("Disable", &()).await.is_ok();
                 self.clipboard_enabled = !disabled;
             }
@@ -233,19 +280,11 @@ impl Mutter {
         paste
     }
 
-    async fn clipboard_proxy(&self) -> zbus::Result<Proxy<'_>> {
-        Proxy::new(
-            &self.connection,
-            self.owner.as_str(),
-            self.remote_path.as_str(),
-            CLIPBOARD,
-        )
-        .await
-    }
-
     async fn stop_clipboard_task(&mut self) {
-        if let Some(task) = self.clipboard_task.take() {
-            task.abort();
+        if let Some(ClipboardTask { stop, task }) = self.clipboard_task.take() {
+            // An in-flight write owns an FD and must finish or time out and
+            // acknowledge failure before we retire its clipboard source.
+            let _ = stop.send(());
             let _ = task.await;
         }
     }
@@ -260,13 +299,18 @@ impl Mutter {
 
 impl Drop for Mutter {
     fn drop(&mut self) {
-        if let Some(task) = self.clipboard_task.take() {
+        if let Some(ClipboardTask { task, .. }) = self.clipboard_task.take() {
             task.abort();
         }
     }
 }
 
-async fn transfer_text(clipboard: &Proxy<'_>, message: &zbus::Message, text: &[u8]) -> Result<()> {
+async fn transfer_text(
+    clipboard: &Proxy<'_>,
+    message: &zbus::Message,
+    text: &[u8],
+    timeout: Duration,
+) -> Result<()> {
     let (mime, serial): (String, u32) = message.body().deserialize()?;
     ensure!(
         TEXT_MIME_TYPES.contains(&mime.as_str()),
@@ -276,7 +320,7 @@ async fn transfer_text(clipboard: &Proxy<'_>, message: &zbus::Message, text: &[u
         .call("SelectionWrite", &(serial,))
         .await
         .context("open private clipboard transfer")?;
-    let transfer = time::timeout(PASTE_TIMEOUT, write_fd(fd.into(), text))
+    let transfer = time::timeout(timeout, write_fd(fd.into(), text))
         .await
         .context("clipboard transfer timed out")
         .and_then(|result| result);
@@ -365,3 +409,6 @@ async fn write_fd(fd: OwnedFd, data: &[u8]) -> Result<()> {
         .await
         .context("write private clipboard pipe")
 }
+
+#[cfg(test)]
+mod tests;

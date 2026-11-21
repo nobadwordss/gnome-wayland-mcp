@@ -1,6 +1,6 @@
 # GNOME Wayland MCP
 
-A local Rust MCP server that gives Codex a private headless GNOME Wayland desktop. It starts Mutter with one virtual monitor, launches a configured native Wayland app, and provides screenshots, mouse input, keyboard shortcuts, and Unicode paste. You can keep using your regular desktop while the agent works.
+Test native Linux GUI apps from an MCP client in a private headless GNOME Wayland desktop. The server starts Mutter with one virtual monitor and launches a configured Wayland app so an agent can capture screenshots, click through an interface, and enter text while you keep using your regular desktop. The server uses MCP over stdio, and the quick start below uses Codex.
 
 ![GNOME Text Editor running on a private 1280 × 800 Wayland desktop after Codex clicked it and entered two lines of English text](docs/codex-headless-demo.png)
 
@@ -17,14 +17,15 @@ sudo dnf install mutter dbus-daemon pipewire wireplumber gstreamer1 \
 
 ### Download the Linux x86_64 binary
 
-The [v0.1.0 release](https://github.com/nobadwordss/gnome-wayland-mcp/releases/tag/v0.1.0) provides a statically linked Linux x86_64 executable. You can install and run it without a Rust toolchain.
+The [v0.2.0 release](https://github.com/nobadwordss/gnome-wayland-mcp/releases/tag/v0.2.0) provides a statically linked Linux x86_64 executable. You can install and run it without a Rust toolchain.
 
 ```sh
-archive=gnome-wayland-mcp-v0.1.0-linux-x86_64.tar.gz
-release=https://github.com/nobadwordss/gnome-wayland-mcp/releases/download/v0.1.0
-curl -fLO "$release/$archive"
-curl -fLO "$release/$archive.sha256"
-sha256sum -c "$archive.sha256" && tar -xzf "$archive" && \
+archive=gnome-wayland-mcp-v0.2.0-linux-x86_64.tar.gz
+release=https://github.com/nobadwordss/gnome-wayland-mcp/releases/download/v0.2.0
+curl -fLO "$release/$archive" &&
+  curl -fLO "$release/$archive.sha256" &&
+  sha256sum -c "$archive.sha256" &&
+  tar -xzf "$archive" &&
   install -Dm755 "${archive%.tar.gz}/gnome-wayland-mcp" "$HOME/.local/bin/gnome-wayland-mcp"
 ```
 
@@ -103,7 +104,13 @@ The Codex test verified screenshots, coordinate clicks, shortcut keys, and Unico
 python3 -B tests/headless_smoke.py target/release/gnome-wayland-mcp
 ```
 
-This is an initial release. Compatibility beyond the environment above remains unverified. The server uses Mutter's private D-Bus interfaces, which can change between versions.
+The clipboard integration tests run against a disposable D-Bus daemon and pass real Unix file descriptors. They exercise late transfer signals, missing transfers, and stalled clipboard writes. Run them with the Rust toolchain and `/usr/bin/dbus-daemon` installed.
+
+```sh
+cargo test --locked mutter::tests
+```
+
+Compatibility beyond the environment above remains unverified. The server uses Mutter's private D-Bus interfaces, which can change between versions.
 
 ## MCP tools
 
@@ -117,14 +124,16 @@ This is an initial release. Compatibility beyond the environment above remains u
 | `mouse_click` | Clicks `{point: {frame_id, x, y}, button}`. Defaults to `left`. |
 | `mouse_scroll` | Scrolls at `{point: {frame_id, x, y}, vertical, horizontal}`. Positive steps move down or right. |
 | `press_key` | Sends `{key, modifiers}`. Supports lowercase ASCII letters, digits, and named keys such as `Enter` and `Left`. |
-| `type_text` | Pastes `{text}` into the focused editable field. Accepts up to 16 KiB of UTF-8. |
+| `type_text` | Pastes up to 16 KiB of UTF-8 from `{text}` into the focused editable field. Defaults to Ctrl+V. |
 | `desktop_stop` | Stops the desktop and the running app. |
 
-Screenshot coordinates start at the top-left pixel. Each pointer action uses the current `frame_id`. A new screenshot, app launch, or input invalidates earlier IDs. A `dispatched` response confirms delivery to Mutter. Use a fresh screenshot to confirm the app's response, especially before sending a key immediately after a paste.
+Screenshot coordinates start at the top-left pixel. Each pointer action uses the current `frame_id`. A new screenshot, app launch, or input invalidates earlier IDs. A `dispatched` response confirms delivery to Mutter. For `type_text`, Mutter also acknowledges a clipboard transfer and can request the text for its own clipboard cache. Use a fresh screenshot to verify that the app inserted the text before pressing Enter or replacing the clipboard with another `type_text` call.
+
+Pass `{"text":"Hello","paste_shortcut":"ctrl_shift_v"}` for apps whose paste shortcut is Ctrl+Shift+V. Omit `paste_shortcut`, pass `null`, or pass `"ctrl_v"` to use Ctrl+V.
 
 ## Session behavior
 
-The private desktop owns its Wayland socket, D-Bus, PipeWire, keyboard focus, and clipboard. Screenshots and input apply to apps launched inside that desktop. The app gets a temporary home and profile, which are removed when the session ends. Save any files you want to retain to an explicit persistent path. The last text supplied to `type_text` remains available to apps on the private clipboard until another paste replaces it or the session stops.
+The private desktop owns its Wayland socket, D-Bus, PipeWire, keyboard focus, and clipboard. Screenshots and input apply to apps launched inside that desktop. The app gets a temporary home and profile, which are removed when the session ends. Save any files you want to retain to an explicit persistent path. After a successful `type_text` call, the text remains available to apps on the private clipboard until another paste replaces it or the session stops. Mutter can also retain a cached copy after a paste error. Check the app before retrying an error that reports possible dispatch.
 
 The runtime uses the installed Mutter executable directly. Docker, GNOME Shell extensions, Xwayland, RDP, and host screen-sharing permission are optional to the host and unnecessary for this server. Apps run with the invoking user's OS permissions and can access files and the network as that user. Choose an app you trust.
 

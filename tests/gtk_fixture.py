@@ -23,6 +23,8 @@ state = {
     "clicks": 0,
     "motion": 0,
     "scroll": 0,
+    "ctrl_pastes": 0,
+    "shift_pastes": 0,
     "text": "",
 }
 
@@ -52,10 +54,54 @@ def activate(app):
     button.add_controller(motion)
     stage.put(button, 100, 100)
 
-    entry = Gtk.Entry(placeholder_text="Paste target")
-    entry.set_size_request(400, 60)
-    entry.connect("changed", lambda widget: update(text=widget.get_text()))
-    stage.put(entry, 450, 110)
+    editor = Gtk.TextView()
+    editor.set_size_request(400, 100)
+    buffer = editor.get_buffer()
+    buffer.connect("changed", lambda widget: update(
+        text=widget.get_text(widget.get_start_iter(), widget.get_end_iter(), False)
+    ))
+    defer_paste = False
+    pending_text = None
+
+    def receive_paste(clipboard, result):
+        nonlocal pending_text
+        text = clipboard.read_text_finish(result)
+        if defer_paste:
+            pending_text = text
+        elif text is not None:
+            buffer.insert_at_cursor(text)
+
+    def key_pressed(_controller, keyval, _keycode, modifiers):
+        nonlocal defer_paste, pending_text
+        if keyval == Gdk.KEY_F6:
+            # Model an app that reads the clipboard asynchronously and commits it later.
+            defer_paste = True
+            update(paste_deferred=True)
+            return True
+        if keyval == Gdk.KEY_Return and defer_paste:
+            defer_paste = False
+            update(text_at_enter=state["text"])
+            if pending_text is not None:
+                buffer.insert_at_cursor(pending_text)
+                pending_text = None
+            return True
+        if keyval not in (Gdk.KEY_v, Gdk.KEY_V):
+            return False
+        modifiers &= Gtk.accelerator_get_default_mod_mask()
+        ctrl = Gdk.ModifierType.CONTROL_MASK
+        if modifiers == ctrl:
+            update(ctrl_pastes=state["ctrl_pastes"] + 1)
+        elif modifiers == ctrl | Gdk.ModifierType.SHIFT_MASK:
+            update(shift_pastes=state["shift_pastes"] + 1)
+            editor.get_clipboard().read_text_async(None, receive_paste)
+            return True
+        return False
+
+    keys = Gtk.EventControllerKey()
+    keys.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+    keys.connect("key-pressed", key_pressed)
+    editor.add_controller(keys)
+    stage.put(editor, 450, 110)
 
     scroller = Gtk.ScrolledWindow()
     scroller.set_size_request(320, 225)
