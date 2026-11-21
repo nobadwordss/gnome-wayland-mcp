@@ -2,7 +2,17 @@ mod mcp;
 mod mutter;
 mod runtime;
 
-use std::{env, ffi::OsString, future::Future, path::PathBuf, process, time::Duration};
+use std::{
+    env,
+    ffi::OsString,
+    future::Future,
+    io,
+    path::PathBuf,
+    pin::Pin,
+    process,
+    task::{Context as TaskContext, Poll},
+    time::Duration,
+};
 
 use anyhow::{Context, Result, ensure};
 use clap::Parser;
@@ -11,9 +21,12 @@ use rustix::process::{
     Pid, Signal, getppid, kill_process, set_parent_process_death_signal, setsid,
 };
 use tokio::{
+    io::{AsyncRead, ReadBuf, Stdin},
     process::Command,
     signal::unix::{SignalKind, signal},
 };
+
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     mcp::Server,
@@ -112,16 +125,23 @@ async fn serve(args: Cli, shutdown: impl Future<Output = ()>) -> Result<()> {
     } else {
         None
     };
+    let stopping = CancellationToken::new();
     let server = Server::new(
         Size {
             width: args.width,
             height: args.height,
         },
         program,
+        stopping.clone(),
     );
+    let (stdin, stdout) = rmcp::transport::stdio();
+    let stdin = ShutdownInput {
+        stdin,
+        stopping: stopping.clone(),
+    };
     tokio::pin!(shutdown);
     let service = tokio::select! {
-        result = server.clone().serve(rmcp::transport::stdio()) => result.context("initialize MCP stdio")?,
+        result = server.clone().serve((stdin, stdout)) => result.context("initialize MCP stdio")?,
         _ = &mut shutdown => return Ok(()),
     };
     let cancellation = service.cancellation_token();
@@ -129,9 +149,36 @@ async fn serve(args: Cli, shutdown: impl Future<Output = ()>) -> Result<()> {
     tokio::pin!(waiting);
     let result = tokio::select! {
         result = &mut waiting => result,
-        _ = &mut shutdown => { cancellation.cancel(); waiting.await }
+        _ = &mut shutdown => { stopping.cancel(); cancellation.cancel(); waiting.await }
     };
     server.shutdown().await;
     result.context("MCP service failed")?;
     Ok(())
+}
+
+struct ShutdownInput {
+    stdin: Stdin,
+    stopping: CancellationToken,
+}
+
+impl AsyncRead for ShutdownInput {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let before = buf.filled().len();
+        let remaining = buf.remaining();
+        let result = Pin::new(&mut self.stdin).poll_read(cx, buf);
+        // The MCP transport drains pending requests after EOF. Notify startup
+        // immediately so it can clean up while the transport is draining.
+        if matches!(result, Poll::Ready(Err(_)))
+            || (remaining > 0
+                && matches!(result, Poll::Ready(Ok(())))
+                && buf.filled().len() == before)
+        {
+            self.stopping.cancel();
+        }
+        result
+    }
 }

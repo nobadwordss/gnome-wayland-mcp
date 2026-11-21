@@ -1,6 +1,6 @@
 [package]
 name = "gnome-wayland-mcp"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 rust-version = "1.91"
 description = "Local MCP for a private headless GNOME Wayland desktop"
@@ -20,6 +20,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tempfile = "3.24"
 tokio = { version = "1.49", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 uuid = { version = "1.20", features = ["v4"] }
 zbus = { version = "5.18", default-features = false, features = ["tokio"] }
 

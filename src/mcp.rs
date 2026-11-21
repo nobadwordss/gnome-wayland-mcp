@@ -12,6 +12,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
@@ -20,7 +21,10 @@ use crate::{
 };
 
 #[derive(Clone)]
-pub(crate) struct Server(Arc<Mutex<State>>);
+pub(crate) struct Server {
+    state: Arc<Mutex<State>>,
+    stopping: CancellationToken,
+}
 
 struct State {
     size: Size,
@@ -147,23 +151,43 @@ enum Action {
 }
 
 impl Server {
-    pub fn new(size: Size, program: Option<Program>) -> Self {
-        Self(Arc::new(Mutex::new(State {
-            size,
-            program,
-            desktop: None,
-        })))
+    pub fn new(size: Size, program: Option<Program>, stopping: CancellationToken) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(State {
+                size,
+                program,
+                desktop: None,
+            })),
+            stopping,
+        }
     }
 
     pub async fn shutdown(&self) {
-        self.0.lock().await.stop().await;
+        self.stopping.cancel();
+        self.state.lock().await.stop().await;
     }
 
     async fn execute(&self, action: Action) -> CallToolResult {
         // A cancelled caller waiting for the lock has done nothing. Once started,
         // the operation owns the lock until its releases and cleanup finish.
-        let mut state = self.0.clone().lock_owned().await;
-        let result = tokio::spawn(async move { state.execute(action).await }).await;
+        let Some(mut state) = self
+            .stopping
+            .run_until_cancelled(self.state.clone().lock_owned())
+            .await
+        else {
+            return CallToolResult::error(vec![ContentBlock::text(
+                "Private desktop server is shutting down.",
+            )]);
+        };
+        let stopping = self.stopping.clone();
+        let result = tokio::spawn(async move {
+            ensure!(
+                !stopping.is_cancelled(),
+                "private desktop server is shutting down"
+            );
+            state.execute(action, &stopping).await
+        })
+        .await;
         match result {
             Ok(Ok(result)) => result,
             Ok(Err(error)) => CallToolResult::error(vec![ContentBlock::text(format!("{error:#}"))]),
@@ -279,7 +303,11 @@ impl ServerHandler for Server {
 }
 
 impl State {
-    async fn execute(&mut self, action: Action) -> Result<CallToolResult> {
+    async fn execute(
+        &mut self,
+        action: Action,
+        stopping: &CancellationToken,
+    ) -> Result<CallToolResult> {
         let size = self.size;
         match action {
             Action::Start => {
@@ -289,18 +317,7 @@ impl State {
                     }
                     self.stop().await;
                 }
-                let runtime = Runtime::start(size).await?;
-                let mutter =
-                    Mutter::connect(runtime.bus_address(), runtime.mutter_pid(), size).await?;
-                let capture = runtime.start_capture(mutter.node, size).await?;
-                mutter.prepare_input(size).await?;
-                self.desktop = Some(Desktop {
-                    application: None,
-                    capture,
-                    mutter,
-                    runtime,
-                    frame: None,
-                });
+                self.desktop = Some(Desktop::start(size, stopping).await?);
                 Ok(message(self.status()?))
             }
             Action::Stop => {
@@ -423,6 +440,45 @@ impl State {
 }
 
 impl Desktop {
+    async fn start(size: Size, stopping: &CancellationToken) -> Result<Self> {
+        let mut runtime = Runtime::start(size, stopping).await?;
+        let startup = async {
+            let mutter = stopping
+                .run_until_cancelled(Mutter::connect(
+                    runtime.bus_address(),
+                    runtime.mutter_pid(),
+                    size,
+                ))
+                .await
+                .ok_or_else(|| anyhow!("desktop startup cancelled"))??;
+            let mut capture = runtime.start_capture(mutter.node, size, stopping).await?;
+            let prepared = stopping
+                .run_until_cancelled(mutter.prepare_input(size))
+                .await
+                .unwrap_or_else(|| Err(anyhow!("desktop startup cancelled")));
+            if prepared.is_err() || stopping.is_cancelled() {
+                capture.stop().await;
+                prepared?;
+                bail!("desktop startup cancelled");
+            }
+            Ok((mutter, capture))
+        }
+        .await;
+        match startup {
+            Ok((mutter, capture)) => Ok(Self {
+                application: None,
+                capture,
+                mutter,
+                runtime,
+                frame: None,
+            }),
+            Err(error) => {
+                runtime.stop().await;
+                Err(error)
+            }
+        }
+    }
+
     fn check(&self) -> Result<()> {
         self.runtime.check()?;
         self.capture.check()

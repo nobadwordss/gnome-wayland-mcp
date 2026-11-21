@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use rustix::process::{
     Pid, Signal, WaitId, WaitIdOptions, WaitIdStatus, kill_process_group, waitid,
 };
@@ -19,6 +19,8 @@ use tokio::{
     task::JoinHandle,
     time,
 };
+
+use tokio_util::sync::CancellationToken;
 
 const DISPLAY_NAME: &str = "mcp-wayland";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(8);
@@ -47,7 +49,7 @@ pub(crate) struct Runtime {
 }
 
 impl Runtime {
-    pub async fn start(size: Size) -> Result<Self> {
+    pub async fn start(size: Size, stopping: &CancellationToken) -> Result<Self> {
         let dir = Builder::new()
             .prefix("gwm-")
             .permissions(fs::Permissions::from_mode(0o700))
@@ -72,39 +74,56 @@ impl Runtime {
             ),
         )?;
 
-        let bus = env.spawn_service("dbus-daemon", |command| {
-            command
-                .arg("--nofork")
-                .arg(format!("--config-file={}", bus_config.display()));
-        })?;
-        bus.wait_for_socket(&dir.path().join("bus")).await?;
+        let mut services = Vec::with_capacity(4);
+        let startup = async {
+            env.start_service(&mut services, "dbus-daemon", |command| {
+                command
+                    .arg("--nofork")
+                    .arg(format!("--config-file={}", bus_config.display()));
+            })?
+            .wait_for_socket(&dir.path().join("bus"))
+            .await?;
 
-        let pipewire = env.spawn_service("pipewire", |command| {
-            command.args(["-c", "private.conf"]);
-        })?;
-        pipewire
+            env.start_service(&mut services, "pipewire", |command| {
+                command.args(["-c", "private.conf"]);
+            })?
             .wait_for_socket(&dir.path().join("pipewire-0"))
             .await?;
-        let wireplumber = env.spawn_service("wireplumber", |command| {
-            command.args(["--profile", "policy"]);
-        })?;
 
-        let mutter = env.spawn_service("mutter", |command| {
-            command
-                .args([
-                    "--headless",
-                    "--wayland",
-                    "--no-x11",
-                    "--wayland-display",
-                    DISPLAY_NAME,
-                ])
-                .arg("--virtual-monitor")
-                .arg(format!("{}x{}", size.width, size.height));
-        })?;
-        mutter
+            env.start_service(&mut services, "wireplumber", |command| {
+                command.args(["--profile", "policy"]);
+            })?;
+
+            env.start_service(&mut services, "mutter", |command| {
+                command
+                    .args([
+                        "--headless",
+                        "--wayland",
+                        "--no-x11",
+                        "--wayland-display",
+                        DISPLAY_NAME,
+                    ])
+                    .arg("--virtual-monitor")
+                    .arg(format!("{}x{}", size.width, size.height));
+            })?
             .wait_for_socket(&dir.path().join(DISPLAY_NAME))
             .await?;
-
+            services.iter().try_for_each(Process::check)
+        };
+        let result = stopping
+            .run_until_cancelled(startup)
+            .await
+            .unwrap_or_else(|| Err(anyhow!("desktop startup cancelled")));
+        if let Err(error) = result {
+            // Service ownership stays outside the cancellable future. Reap any
+            // children that started before deleting the runtime directory.
+            for process in services.iter_mut().rev() {
+                process.stop().await;
+            }
+            return Err(error);
+        }
+        let [bus, pipewire, wireplumber, mutter] =
+            services.try_into().ok().expect("four started services");
         let runtime = Self {
             mutter,
             wireplumber,
@@ -113,7 +132,6 @@ impl Runtime {
             env,
             _dir: dir,
         };
-        runtime.check()?;
         Ok(runtime)
     }
 
@@ -141,7 +159,12 @@ impl Runtime {
         Process::spawn("configured application", &mut command)
     }
 
-    pub async fn start_capture(&self, node: u32, size: Size) -> Result<Capture> {
+    pub async fn start_capture(
+        &self,
+        node: u32,
+        size: Size,
+        stopping: &CancellationToken,
+    ) -> Result<Capture> {
         self.check()?;
         let mut command = self.env.command(Path::new("/usr/bin/gst-launch-1.0"));
         command.args([
@@ -169,11 +192,10 @@ impl Runtime {
             .stdout(Stdio::piped())
             .stderr(self.env.service_log("capture")?);
         let mut process = Process::spawn("GStreamer capture", &mut command)?;
-        let output = process
-            .child
-            .stdout
-            .take()
-            .context("open private capture pipe")?;
+        let Some(output) = process.child.stdout.take() else {
+            process.stop().await;
+            bail!("open private capture pipe");
+        };
         let (tx, rx) = watch::channel(None);
         let reader = tokio::spawn(read_pngs(output, size, tx));
         let mut capture = Capture {
@@ -181,14 +203,22 @@ impl Runtime {
             reader,
             frames: rx,
         };
-        match time::timeout(CAPTURE_TIMEOUT, capture.frames.changed()).await {
-            Ok(Ok(())) => Ok(capture),
-            Ok(Err(_)) => {
-                let reason = capture.read_error().await;
-                bail!("unable to open private capture stream: {reason}")
+        let error = match stopping
+            .run_until_cancelled(time::timeout(CAPTURE_TIMEOUT, capture.frames.changed()))
+            .await
+        {
+            Some(Ok(Ok(()))) => return Ok(capture),
+            Some(Ok(Err(_))) => anyhow!(
+                "unable to open private capture stream: {}",
+                capture.read_error().await
+            ),
+            Some(Err(_)) => {
+                anyhow!("private capture timed out; check PipeWire and GStreamer plugins")
             }
-            Err(_) => bail!("private capture timed out; check PipeWire and GStreamer plugins"),
-        }
+            None => anyhow!("desktop startup cancelled"),
+        };
+        capture.stop().await;
+        Err(error)
     }
 
     pub async fn stop(&mut self) {
@@ -271,16 +301,18 @@ impl PrivateEnv {
         command
     }
 
-    fn spawn_service(
+    fn start_service<'a>(
         &self,
+        services: &'a mut Vec<Process>,
         name: &'static str,
         configure: impl FnOnce(&mut Command),
-    ) -> Result<Process> {
+    ) -> Result<&'a Process> {
         // Fixed system paths cannot accidentally resolve a similarly named project command.
         let mut command = self.command(&Path::new("/usr/bin").join(name));
         command.stderr(self.service_log(name)?);
         configure(&mut command);
-        Process::spawn(name, &mut command)
+        services.push(Process::spawn(name, &mut command)?);
+        Ok(services.last().expect("the service was pushed"))
     }
 
     fn service_log(&self, name: &str) -> Result<Stdio> {

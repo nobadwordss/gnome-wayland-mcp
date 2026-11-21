@@ -1,6 +1,6 @@
 # GNOME Wayland MCP
 
-Test native Linux GUI apps from an MCP client in a private headless GNOME Wayland desktop. The server starts Mutter with one virtual monitor and launches a configured Wayland app so an agent can capture screenshots, click through an interface, and enter text while you keep using your regular desktop. The server uses MCP over stdio, and the quick start below uses Codex.
+Test native Linux GUI apps from an MCP client in a private headless GNOME Wayland desktop. The server starts Mutter with one virtual monitor and launches a configured Wayland app so an agent can capture screenshots, click through an interface, and enter text while you keep using your regular desktop. The server uses local MCP over stdio. Setup examples cover Codex, Claude Code, and Gemini CLI.
 
 ![GNOME Text Editor running on a private 1280 × 800 Wayland desktop after Codex clicked it and entered two lines of English text](docs/codex-headless-demo.png)
 
@@ -8,7 +8,7 @@ Test native Linux GUI apps from an MCP client in a private headless GNOME Waylan
 
 ## Quick start
 
-Both installation methods require Codex and Linux with Mutter, D-Bus, PipeWire, WirePlumber 0.5 or later, and GStreamer installed under `/usr/bin`. The example uses GNOME Text Editor. On Fedora, install any missing runtime dependencies with the following command.
+The server runs on Linux with Mutter, D-Bus, PipeWire, WirePlumber 0.5 or later, and GStreamer installed under `/usr/bin`. The examples use GNOME Text Editor. On Fedora, install any missing runtime dependencies with the following command.
 
 ```sh
 sudo dnf install mutter dbus-daemon pipewire wireplumber gstreamer1 \
@@ -17,11 +17,11 @@ sudo dnf install mutter dbus-daemon pipewire wireplumber gstreamer1 \
 
 ### Download the Linux x86_64 binary
 
-The [v0.2.1 release](https://github.com/nobadwordss/gnome-wayland-mcp/releases/tag/v0.2.1) provides a statically linked Linux x86_64 executable. You can install and run it without a Rust toolchain.
+The [v0.2.2 release](https://github.com/nobadwordss/gnome-wayland-mcp/releases/tag/v0.2.2) provides a statically linked Linux x86_64 executable. You can install and run it without a Rust toolchain.
 
 ```sh
-archive=gnome-wayland-mcp-v0.2.1-linux-x86_64.tar.gz
-release=https://github.com/nobadwordss/gnome-wayland-mcp/releases/download/v0.2.1
+archive=gnome-wayland-mcp-v0.2.2-linux-x86_64.tar.gz
+release=https://github.com/nobadwordss/gnome-wayland-mcp/releases/download/v0.2.2
 curl -fLO "$release/$archive" &&
   curl -fLO "$release/$archive.sha256" &&
   sha256sum -c "$archive.sha256" &&
@@ -58,6 +58,41 @@ Open a new Codex session and try the following prompt.
 
 To choose a different app, change the executable and arguments after the second `--`. Pass an absolute path to a native Wayland executable. The default resolution is 1280 × 800. To change it, pass `--width` and `--height` before the second `--`.
 
+## Other local MCP clients
+
+Install the binary or build from source as shown above. Use a client that launches local stdio servers and passes image tool results to the model. Use the absolute path to your executable and keep the app command after the server's `--` separator.
+
+### Claude Code
+
+Register the server from your terminal. Replace the executable path if you built it from source.
+
+```sh
+claude mcp add --transport stdio --scope user gnome-wayland-mcp \
+  -- "$HOME/.local/bin/gnome-wayland-mcp" -- /usr/bin/gnome-text-editor --standalone
+claude mcp get gnome-wayland-mcp
+```
+
+See the [Claude Code stdio setup guide](https://code.claude.com/docs/en/mcp#option-3-add-a-local-stdio-server).
+
+### Gemini CLI
+
+Add this entry under `mcpServers` in your user `~/.gemini/settings.json` and replace `/home/you` with your own absolute path.
+
+```json
+{
+  "mcpServers": {
+    "gnome-wayland-mcp": {
+      "command": "/home/you/.local/bin/gnome-wayland-mcp",
+      "args": ["--", "/usr/bin/gnome-text-editor", "--standalone"]
+    }
+  }
+}
+```
+
+Run `gemini mcp list` to check the connection. See the [Gemini CLI MCP configuration guide](https://geminicli.com/docs/tools/mcp-server/#configure-the-mcp-server-in-settingsjson).
+
+In either client, ask the agent to call `desktop_start`, then `launch_app` and `screenshot`. Ask it to verify the app's response after any input and call `desktop_stop` when finished.
+
 ## Codex skill
 
 Install the [`$gnome-wayland-mcp` skill](skills/gnome-wayland-mcp/SKILL.md) for guidance on running an app in the private desktop, capturing its screen, and verifying mouse and keyboard input. Set up the MCP server using the quick start above, then install the skill in your Codex user directory.
@@ -87,7 +122,7 @@ The server gives Firefox a temporary home, and the Firefox flags start a separat
 
 ### Ptyxis example
 
-Use this example with GNOME's Ptyxis terminal installed at `/usr/bin/ptyxis`, Bash at `/usr/bin/bash`, and `gnome-wayland-mcp` v0.2.1 registered in Codex. Launch Codex with an argument override for this invocation. The temporary `PATH` lets Ptyxis start Bash directly inside the private session by omitting the optional `systemd-run` launcher.
+Use this example with GNOME's Ptyxis terminal installed at `/usr/bin/ptyxis`, Bash at `/usr/bin/bash`, and `gnome-wayland-mcp` v0.2.2 registered in Codex. Launch Codex with an argument override for this invocation. The temporary `PATH` lets Ptyxis start Bash directly inside the private session by omitting the optional `systemd-run` launcher.
 
 ```sh
 (
@@ -166,7 +201,7 @@ The runtime uses the installed Mutter executable directly. Docker, GNOME Shell e
 
 Each MCP server process keeps at most one private desktop. Repeated `desktop_start` calls reuse a healthy desktop. Separate server processes can each own a desktop, and an idle server keeps its desktop until it receives a stop or shutdown request.
 
-Use `desktop_stop` to release the desktop while Codex is open, then check for `stopped` with `desktop_status`. The server stops its app and desktop services and removes the temporary runtime directory. Cleanup also runs on stdio EOF, `SIGINT`, or `SIGTERM`. A separate worker owns the desktop and runs cleanup if Codex terminates the MCP launcher abruptly. A forced kill of the worker itself can leave processes and runtime files behind. App descendants that leave the managed process group can outlive the session.
+Use `desktop_stop` to release the desktop while Codex is open, then check for `stopped` with `desktop_status`. The server stops its app and desktop services and removes the temporary runtime directory. Cleanup also runs on stdio EOF, `SIGINT`, or `SIGTERM`. A separate worker owns the desktop and runs cleanup if Codex terminates the MCP launcher abruptly. Shutdown interrupts desktop startup and waits for any services already launched to exit before removing the runtime directory. A forced kill of the worker itself can leave processes and runtime files behind. App descendants that leave the managed process group can outlive the session.
 
 ## License
 

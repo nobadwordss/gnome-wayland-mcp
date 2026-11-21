@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 from queue import Queue, Empty
+import select
 import shutil
 import signal
 import subprocess
@@ -39,7 +40,7 @@ class Client:
             self.lines.put(line)
         self.lines.put(None)
 
-    def send(self, method, params=None, notification=False):
+    def write(self, method, params=None, notification=False):
         message = {"jsonrpc": "2.0", "method": method}
         if params is not None:
             message["params"] = params
@@ -48,6 +49,9 @@ class Client:
             message["id"] = self.request_id
         self.process.stdin.write(json.dumps(message).encode() + b"\n")
         self.process.stdin.flush()
+
+    def send(self, method, params=None, notification=False):
+        self.write(method, params, notification)
         if notification:
             return None
         deadline = time.monotonic() + 40
@@ -232,38 +236,94 @@ def runtime_processes(runtime):
     return live
 
 
-def exercise_launcher_loss(client, report):
+def children(pid):
+    return [int(pid) for pid in Path(f"/proc/{pid}/task/{pid}/children").read_text().split()]
+
+
+def stall_private_mutter(worker_pid):
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        for pid in children(worker_pid):
+            proc = Path(f"/proc/{pid}")
+            try:
+                if (proc / "exe").readlink() != Path("/usr/bin/mutter"):
+                    continue
+                environment = (proc / "environ").read_bytes().split(b"\0")
+                marker = next(value for value in environment if value.startswith(b"XDG_RUNTIME_DIR=/tmp/gwm-"))
+                handle = os.pidfd_open(pid)
+            except (FileNotFoundError, ProcessLookupError, StopIteration):
+                continue
+            try:
+                signal.pidfd_send_signal(handle, signal.SIGSTOP)
+                return Path(os.fsdecode(marker.split(b"=", 1)[1]))
+            finally:
+                os.close(handle)
+        time.sleep(0.001)
+    raise AssertionError("Did not find the private Mutter during startup")
+
+
+def exercise_launcher_loss(client, report, *, interrupt_start=False, close_stdin=False):
     initialize(client)
-    assert client.call("desktop_start")["status"] == "desktop_running"
-    assert client.call("launch_app")["status"] == "application_running"
-    app = poll(lambda: snapshot(report), lambda state: state.get("ready"), "GTK window for shutdown test")
-    runtime = Path(app["runtime"])
-    assert runtime.parent == Path("/tmp") and runtime.name.startswith("gwm-")
-    assert (runtime / "bus.conf").is_file()
-    assert app["pid"] in runtime_processes(runtime)
+    launcher = client.process.pid
+    (worker,) = children(launcher)
+    args = Path(f"/proc/{worker}/cmdline").read_bytes().split(b"\0")
+    assert args[1:3] == [b"--worker-parent-pid", str(launcher).encode()]
+    assert os.getsid(worker) != os.getsid(launcher)
+    worker_handle = os.pidfd_open(worker)
+    worker_exit = select.poll()
+    worker_exit.register(worker_handle, select.POLLIN)
+    runtime = None
 
     try:
-        # A client can discard the launcher with a signal that it cannot handle.
-        # Keep its stdin open so a graceful EOF cannot satisfy this test.
-        os.killpg(client.process.pid, signal.SIGKILL)
-        assert client.process.wait(timeout=5) == -signal.SIGKILL
-        poll(lambda: (runtime.exists(), runtime_processes(runtime)),
-             lambda state: state == (False, set()), "private desktop cleanup after SIGKILL")
+        if interrupt_start:
+            client.write("tools/call", {"name": "desktop_start", "arguments": {}})
+            candidate = stall_private_mutter(worker)
+        else:
+            assert client.call("desktop_start")["status"] == "desktop_running"
+            assert client.call("launch_app")["status"] == "application_running"
+            app = poll(lambda: snapshot(report), lambda state: state.get("ready"), "GTK window for shutdown test")
+            candidate = Path(app["runtime"])
+        assert candidate.parent == Path("/tmp") and candidate.name.startswith("gwm-")
+        assert (candidate / "bus.conf").is_file()
+        runtime = candidate
+        if interrupt_start:
+            assert client.lines.empty(), "desktop_start had already replied"
+        else:
+            assert app["pid"] in runtime_processes(runtime)
+
+        if close_stdin:
+            client.process.stdin.close()
+        else:
+            # Keep stdin open so EOF cannot satisfy the launcher-loss test.
+            os.killpg(launcher, signal.SIGKILL)
+            assert client.process.wait(timeout=3) == -signal.SIGKILL
+        poll(lambda: (runtime.exists(), runtime_processes(runtime), bool(worker_exit.poll(0))),
+             lambda state: state == (False, set(), True),
+             "private runtime and worker exit after shutdown", timeout=3)
+        if close_stdin:
+            assert client.process.wait(timeout=3) == 0
     finally:
-        # Keep a regression from leaving this test's private desktop alive.
-        for pid in runtime_processes(runtime):
-            try:
-                handle = os.pidfd_open(pid)
+        # A failure must not leave the stopped test compositor or worker alive.
+        if runtime:
+            for pid in runtime_processes(runtime):
                 try:
-                    if pid in runtime_processes(runtime):
-                        signal.pidfd_send_signal(handle, signal.SIGKILL)
-                finally:
-                    os.close(handle)
-            except ProcessLookupError:
-                pass
-        if runtime.exists():
+                    handle = os.pidfd_open(pid)
+                    try:
+                        if pid in runtime_processes(runtime):
+                            signal.pidfd_send_signal(handle, signal.SIGKILL)
+                    finally:
+                        os.close(handle)
+                except ProcessLookupError:
+                    pass
+            if not worker_exit.poll(500):
+                try:
+                    signal.pidfd_send_signal(worker_handle, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
             poll(lambda: runtime_processes(runtime), lambda live: not live, "test process teardown")
-            shutil.rmtree(runtime)
+            if runtime.exists():
+                shutil.rmtree(runtime)
+        os.close(worker_handle)
 
 
 def main():
@@ -282,13 +342,21 @@ def main():
             finally:
                 client.close()
 
-            report = root / "crash.json"
-            client = Client(binary, fixture, report, log, own_process_group=True)
-            try:
-                exercise_launcher_loss(client, report)
-            finally:
-                client.close()
-    print("Passed: MCP, private sockets, PNG, pointer, click, scroll, keys, paste shortcuts and async insertion, stale frame, stop/restart, SIGTERM, launcher SIGKILL")
+            for scenario, options in (
+                ("running", {}),
+                ("startup-sigkill", {"interrupt_start": True}),
+                ("startup-eof", {"interrupt_start": True, "close_stdin": True}),
+            ):
+                report = root / f"{scenario}.json"
+                client = Client(binary, fixture, report, log, own_process_group=True)
+                try:
+                    exercise_launcher_loss(client, report, **options)
+                except Exception:
+                    print(log_path.read_text(encoding="utf-8"), file=sys.stderr)
+                    raise
+                finally:
+                    client.close()
+    print("Passed: MCP, private sockets, PNG, pointer, click, scroll, keys, paste shortcuts and async insertion, stale frame, stop/restart, SIGTERM, launcher loss, interrupted startup, worker exit")
 
 
 if __name__ == "__main__":
