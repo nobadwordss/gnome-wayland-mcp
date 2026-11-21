@@ -8,14 +8,37 @@ A local Rust MCP server that gives Codex a private headless GNOME Wayland deskto
 
 ## Quick start
 
-Use Linux with Rust 1.91 or later, Codex, and Mutter, D-Bus, PipeWire, WirePlumber 0.5 or later, and GStreamer installed under `/usr/bin`. The example uses GNOME Text Editor. On Fedora, install any missing runtime dependencies with:
+Both installation methods require Codex and Linux with Mutter, D-Bus, PipeWire, WirePlumber 0.5 or later, and GStreamer installed under `/usr/bin`. The example uses GNOME Text Editor. On Fedora, install any missing runtime dependencies with the following command.
 
 ```sh
 sudo dnf install mutter dbus-daemon pipewire wireplumber gstreamer1 \
   pipewire-gstreamer gstreamer1-plugins-base gstreamer1-plugins-good gnome-text-editor
 ```
 
-Build and register the server from the checkout:
+### Download the Linux x86_64 binary
+
+The [v0.1.0 release](https://github.com/nobadwordss/gnome-wayland-mcp/releases/tag/v0.1.0) provides a statically linked Linux x86_64 executable. You can install and run it without a Rust toolchain.
+
+```sh
+archive=gnome-wayland-mcp-v0.1.0-linux-x86_64.tar.gz
+release=https://github.com/nobadwordss/gnome-wayland-mcp/releases/download/v0.1.0
+curl -fLO "$release/$archive"
+curl -fLO "$release/$archive.sha256"
+sha256sum -c "$archive.sha256" && tar -xzf "$archive" && \
+  install -Dm755 "${archive%.tar.gz}/gnome-wayland-mcp" "$HOME/.local/bin/gnome-wayland-mcp"
+```
+
+Register the installed executable with Codex.
+
+```sh
+codex mcp add gnome-wayland-mcp -- "$HOME/.local/bin/gnome-wayland-mcp" \
+  -- /usr/bin/gnome-text-editor --standalone
+codex mcp get gnome-wayland-mcp
+```
+
+### Build from source
+
+Use Rust 1.91 or later to build and register the server from a checkout.
 
 ```sh
 git clone https://github.com/nobadwordss/gnome-wayland-mcp.git
@@ -26,7 +49,9 @@ codex mcp add gnome-wayland-mcp -- "$PWD/target/release/gnome-wayland-mcp" \
 codex mcp get gnome-wayland-mcp
 ```
 
-Open a new Codex session and try this prompt:
+### Try it in Codex
+
+Open a new Codex session and try the following prompt.
 
 > Use `gnome-wayland-mcp` to start the private desktop and launch the configured app. Take a screenshot, click the editing area, and enter “Hello from the private desktop.” Take another screenshot to verify the text, then stop the desktop.
 
