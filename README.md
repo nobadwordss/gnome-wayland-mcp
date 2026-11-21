@@ -1,14 +1,20 @@
 # GNOME Wayland MCP
 
-Test native Linux GUI apps from an MCP client in a private headless GNOME Wayland desktop. The server starts Mutter with one virtual monitor and launches a configured Wayland app so an agent can capture screenshots, click through an interface, and enter text while you keep using your regular desktop. The server uses local MCP over stdio. Setup examples cover Codex, Claude Code, and Gemini CLI.
+Test native Linux GUI apps with an MCP agent on a separate GNOME Wayland display. The agent can launch a configured app, capture screenshots, click, and type while you keep using your regular desktop.
 
-![GNOME Text Editor running on a private 1280 × 800 Wayland desktop after Codex clicked it and entered two lines of English text](docs/codex-headless-demo.png)
+[Linux runtime requirements](#requirements). End-to-end testing covers Codex on Fedora Workstation 45 (x86_64) with Mutter 51.1. Claude Code and Gemini CLI have standard local stdio setup examples.
 
-*Actual `screenshot` response from the registered MCP running through Codex. Codex launched GNOME Text Editor, clicked its editing area, and entered the text shown.*
+[Download for Linux x86_64](#download-the-linux-x86_64-binary) · [Codex](#codex) · [Claude Code](#claude-code) · [Gemini CLI](#gemini-cli)
+
+![Codex opens GNOME Text Editor, clicks New Document, pastes a multiline checklist with an emoji, and finds a match with Ctrl+F](docs/gnome-text-editor-demo.gif)
+
+*Actual v0.2.2 screenshots from the private display, shown alongside the MCP calls that produced them.* [Full-size screenshot from the original Codex test](docs/codex-headless-demo.png).
 
 ## Quick start
 
-The server runs on Linux with Mutter, D-Bus, PipeWire, WirePlumber 0.5 or later, and GStreamer installed under `/usr/bin`. The examples use GNOME Text Editor. On Fedora, install any missing runtime dependencies with the following command.
+### Requirements
+
+Use a Linux host with Mutter, D-Bus, PipeWire, WirePlumber 0.5 or later, and GStreamer installed under `/usr/bin`. The examples use GNOME Text Editor. On Fedora, install any missing runtime dependencies with the following command.
 
 ```sh
 sudo dnf install mutter dbus-daemon pipewire wireplumber gstreamer1 \
@@ -29,7 +35,21 @@ curl -fLO "$release/$archive" &&
   install -Dm755 "${archive%.tar.gz}/gnome-wayland-mcp" "$HOME/.local/bin/gnome-wayland-mcp"
 ```
 
-Register the installed executable with Codex.
+### Build from source
+
+Use Rust 1.91 or later to build the server from a checkout.
+
+```sh
+git clone https://github.com/nobadwordss/gnome-wayland-mcp.git
+cd gnome-wayland-mcp
+cargo build --locked --release
+```
+
+## Connect your MCP client
+
+Use a client that launches local stdio servers and passes image tool results to the model. The examples assume the downloaded binary is in `~/.local/bin`. If you built from source, use the absolute path to `target/release/gnome-wayland-mcp`.
+
+### Codex
 
 ```sh
 codex mcp add gnome-wayland-mcp -- "$HOME/.local/bin/gnome-wayland-mcp" \
@@ -37,34 +57,7 @@ codex mcp add gnome-wayland-mcp -- "$HOME/.local/bin/gnome-wayland-mcp" \
 codex mcp get gnome-wayland-mcp
 ```
 
-### Build from source
-
-Use Rust 1.91 or later to build and register the server from a checkout.
-
-```sh
-git clone https://github.com/nobadwordss/gnome-wayland-mcp.git
-cd gnome-wayland-mcp
-cargo build --locked --release
-codex mcp add gnome-wayland-mcp -- "$PWD/target/release/gnome-wayland-mcp" \
-  -- /usr/bin/gnome-text-editor --standalone
-codex mcp get gnome-wayland-mcp
-```
-
-### Try it in Codex
-
-Open a new Codex session and try the following prompt.
-
-> Use `gnome-wayland-mcp` to start the private desktop and launch the configured app. Take a screenshot, click the editing area, and enter “Hello from the private desktop.” Take another screenshot to verify the text, then stop the desktop.
-
-To choose a different app, change the executable and arguments after the second `--`. Pass an absolute path to a native Wayland executable. The default resolution is 1280 × 800. To change it, pass `--width` and `--height` before the second `--`.
-
-## Other local MCP clients
-
-Install the binary or build from source as shown above. Use a client that launches local stdio servers and passes image tool results to the model. Use the absolute path to your executable and keep the app command after the server's `--` separator.
-
 ### Claude Code
-
-Register the server from your terminal. Replace the executable path if you built it from source.
 
 ```sh
 claude mcp add --transport stdio --scope user gnome-wayland-mcp \
@@ -89,13 +82,19 @@ Add this entry under `mcpServers` in your user `~/.gemini/settings.json` and rep
 }
 ```
 
-Run `gemini mcp list` to check the connection. See the [Gemini CLI MCP configuration guide](https://geminicli.com/docs/tools/mcp-server/#configure-the-mcp-server-in-settingsjson).
+Run `gemini mcp list` to check the connection. See the [Gemini CLI MCP configuration guide](https://geminicli.com/docs/tools/mcp-server/).
 
-In either client, ask the agent to call `desktop_start`, then `launch_app` and `screenshot`. Ask it to verify the app's response after any input and call `desktop_stop` when finished.
+## Try it
+
+Open a new session in your MCP client and try this prompt with the GNOME Text Editor configuration above.
+
+> Use the `gnome-wayland-mcp` tools to start the private desktop and launch GNOME Text Editor. Take a screenshot, click the editing area, and enter “Hello from the private desktop.” Take a new screenshot to verify the text, then stop the desktop.
+
+To launch a different app, replace the executable and arguments after the server's `--` separator. Use an absolute path to a native Wayland executable. The default resolution is 1280 × 800. Pass `--width` and `--height` before the server's `--` to change it.
 
 ## Codex skill
 
-Install the [`$gnome-wayland-mcp` skill](skills/gnome-wayland-mcp/SKILL.md) for guidance on running an app in the private desktop, capturing its screen, and verifying mouse and keyboard input. Set up the MCP server using the quick start above, then install the skill in your Codex user directory.
+Install the [`$gnome-wayland-mcp` skill](skills/gnome-wayland-mcp/SKILL.md) for guidance on running an app in the private desktop, capturing its screen, and verifying mouse and keyboard input. Follow the [Codex registration steps](#codex), then install the skill in your Codex user directory.
 
 ```sh
 skill_file="$(mktemp)" &&
@@ -160,7 +159,7 @@ In that Codex session, use `$gnome-wayland-mcp` and follow these steps.
 | GNOME Text Editor | 51.0 |
 | Ptyxis | 50.1 |
 
-The Codex test verified screenshots, coordinate clicks, shortcut keys, and Unicode input. The text editor saved the expected UTF-8 text, including a line break and an emoji. The included GTK smoke test also checks mouse movement, scrolling, stale frame rejection, and session cleanup. It needs Python with PyGObject, GTK 4, and Pillow:
+The Codex test verified screenshots, coordinate clicks, shortcut keys, and Unicode input. The text editor saved the expected UTF-8 text, including a line break and an emoji. To check compatibility on your host, run the included GTK smoke test. It also covers mouse movement, scrolling, stale frame rejection, and session cleanup. You need Python with PyGObject, GTK 4, and Pillow.
 
 ```sh
 python3 -B tests/headless_smoke.py target/release/gnome-wayland-mcp
@@ -172,7 +171,7 @@ The clipboard integration tests run against a disposable D-Bus daemon and pass r
 cargo test --locked mutter::tests
 ```
 
-Compatibility beyond the environment above remains unverified. The server uses Mutter's private D-Bus interfaces, which can change between versions.
+The server uses Mutter's private D-Bus interfaces, which can change between versions. The table records the versions used for end-to-end testing.
 
 ## MCP tools
 
@@ -197,11 +196,11 @@ Pass `{"text":"Hello","paste_shortcut":"ctrl_shift_v"}` for apps whose paste sho
 
 The private desktop owns its Wayland socket, D-Bus, PipeWire, keyboard focus, and clipboard. Screenshots and input apply to apps launched inside that desktop. The app gets a temporary home and profile, which are removed when the session ends. Save any files you want to retain to an explicit persistent path. After a successful `type_text` call, the text remains available to apps on the private clipboard until another paste replaces it or the session stops. Mutter can also retain a cached copy after a paste error. Check the app before retrying an error that reports possible dispatch.
 
-The runtime uses the installed Mutter executable directly. Docker, GNOME Shell extensions, Xwayland, RDP, and host screen-sharing permission are optional to the host and unnecessary for this server. Apps run with the invoking user's OS permissions and can access files and the network as that user. Choose an app you trust.
+The runtime uses the installed Mutter executable directly. The private display and input are separate from your regular session. Apps run with the invoking user's OS permissions and can access files and the network as that user.
 
 Each MCP server process keeps at most one private desktop. Repeated `desktop_start` calls reuse a healthy desktop. Separate server processes can each own a desktop, and an idle server keeps its desktop until it receives a stop or shutdown request.
 
-Use `desktop_stop` to release the desktop while Codex is open, then check for `stopped` with `desktop_status`. The server stops its app and desktop services and removes the temporary runtime directory. Cleanup also runs on stdio EOF, `SIGINT`, or `SIGTERM`. A separate worker owns the desktop and runs cleanup if Codex terminates the MCP launcher abruptly. Shutdown interrupts desktop startup and waits for any services already launched to exit before removing the runtime directory. A forced kill of the worker itself can leave processes and runtime files behind. App descendants that leave the managed process group can outlive the session.
+Use `desktop_stop` to release the desktop while the MCP client is open, then check for `stopped` with `desktop_status`. The server stops its app and desktop services and removes the temporary runtime directory. Cleanup also runs on stdio EOF, `SIGINT`, or `SIGTERM`. A separate worker owns the desktop and runs cleanup if the client terminates the MCP launcher abruptly. Shutdown interrupts desktop startup and waits for any services already launched to exit before removing the runtime directory. A forced kill of the worker itself can leave processes and runtime files behind. App descendants that leave the managed process group can outlive the session.
 
 ## License
 
