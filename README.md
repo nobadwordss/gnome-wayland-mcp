@@ -57,6 +57,33 @@ Open a new Codex session and try the following prompt.
 
 To choose a different app, change the executable and arguments after the second `--`. Pass an absolute path to a native Wayland executable. The default resolution is 1280 × 800. To change it, pass `--width` and `--height` before the second `--`.
 
+## Codex skill
+
+Install the [`$gnome-wayland-mcp` skill](skills/gnome-wayland-mcp/SKILL.md) for guidance on running an app in the private desktop, capturing its screen, and verifying mouse and keyboard input. Set up the MCP server using the quick start above, then install the skill in your Codex user directory.
+
+```sh
+skill_file="$(mktemp)" &&
+curl -fsSL https://raw.githubusercontent.com/nobadwordss/gnome-wayland-mcp/main/skills/gnome-wayland-mcp/SKILL.md \
+  -o "$skill_file" && \
+  install -Dm644 "$skill_file" "${CODEX_HOME:-$HOME/.codex}/skills/gnome-wayland-mcp/SKILL.md" &&
+  rm -f "$skill_file"
+```
+
+Open a new Codex session and mention `$gnome-wayland-mcp` in your prompt.
+
+### Firefox example
+
+With native Wayland Firefox installed at `/usr/bin/firefox`, add a separate MCP entry for it. If you built the server from source, use the absolute path to `target/release/gnome-wayland-mcp` instead of the installed binary path.
+
+```sh
+codex mcp add gnome-wayland-firefox -- "$HOME/.local/bin/gnome-wayland-mcp" \
+  -- /usr/bin/firefox --no-remote --new-instance about:blank
+```
+
+The server gives Firefox a temporary home, and the Firefox flags start a separate instance. Open a new Codex session and try the following prompt.
+
+> Use `$gnome-wayland-mcp` with the `gnome-wayland-firefox` MCP entry. Start the private desktop and launch Firefox. Capture the window and click the address bar. Enter `https://example.com/`, then capture the window to verify the address. Press Enter, capture the loaded page, and stop the private desktop.
+
 ## Verified environment
 
 | Component | Tested version |
