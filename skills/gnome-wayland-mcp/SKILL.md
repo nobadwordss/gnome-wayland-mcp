@@ -19,6 +19,12 @@ Use the registered `gnome-wayland-mcp` server for this workflow. It controls app
 - Focus an editable field before calling `type_text` with `{"text":"Hello"}`. This pastes UTF-8 using the private clipboard. When the `type_text` schema offers `paste_shortcut` and the app uses Ctrl+Shift+V, pass `"paste_shortcut":"ctrl_shift_v"`. Use `press_key` for actual key events and shortcuts, for example `{"key":"s","modifiers":["ctrl"]}` or `{"key":"Enter"}`.
 - A `dispatched` response confirms delivery to Mutter. After a paste, capture again and verify that the app inserted the text before pressing Enter or sending another `type_text` call. If a frame is stale, capture again and choose the point from the new image. If an input may have been partially delivered, inspect the current app state before retrying.
 
+## Ptyxis example
+
+Use the [Ptyxis launch command](https://github.com/nobadwordss/gnome-wayland-mcp#ptyxis-example) to open a Codex invocation configured for Ptyxis. It uses a temporary `PATH` and starts Bash directly in the private session. Start the desktop, launch Ptyxis, and click the terminal pane after the prompt appears.
+
+Call `type_text` with `{"text":"한글 붙여넣기 확인 🌱🙂","paste_shortcut":"ctrl_shift_v"}`. Keep the sample on one line with no trailing newline. Capture the pending text at the shell prompt without pressing Enter.
+
 ## Finish
 
-Save any requested files to an explicit persistent path. The private app home disappears when its session ends. Use `desktop_stop` to clean up a disposable test or when the user is done with the private desktop.
+Save any requested files to an explicit persistent path. Stop one-off test sessions with `desktop_stop` after capturing the result, then confirm `stopped` with `desktop_status` before exiting Codex. The private app home disappears when its session ends. Each server process reuses its healthy desktop across repeated `desktop_start` calls.

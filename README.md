@@ -85,6 +85,32 @@ The server gives Firefox a temporary home, and the Firefox flags start a separat
 
 > Use `$gnome-wayland-mcp` with the `gnome-wayland-firefox` MCP entry. Start the private desktop and launch Firefox. Capture the window and click the address bar. Enter `https://example.com/`, then capture the window to verify the address. Press Enter, capture the loaded page, and stop the private desktop.
 
+### Ptyxis example
+
+Use this example with GNOME's Ptyxis terminal installed at `/usr/bin/ptyxis`, Bash at `/usr/bin/bash`, and `gnome-wayland-mcp` v0.2.0 registered in Codex. Launch Codex with an argument override for this invocation. The temporary `PATH` lets Ptyxis start Bash directly inside the private session by omitting the optional `systemd-run` launcher.
+
+```sh
+(
+  set -eu
+  test_path=$(mktemp -d /tmp/gnome-wayland-ptyxis.XXXXXXXX)
+  trap 'rm -f -- "$test_path/bash"; rmdir -- "$test_path"' EXIT
+  ln -s /usr/bin/bash "$test_path/bash"
+
+  ptyxis_args=$(printf '%s' \
+    '["--", "/usr/bin/env", "PATH='"$test_path"'", "LC_ALL=C.UTF-8", ' \
+    '"PS1=paste-test $ ", "/usr/bin/ptyxis", "--standalone", ' \
+    '"--", "/usr/bin/bash", "--noprofile", "--norc", "-i"]')
+  codex -c "mcp_servers.gnome-wayland-mcp.args=$ptyxis_args"
+)
+```
+
+In that Codex session, use `$gnome-wayland-mcp` and follow these steps.
+
+1. Call `desktop_start`, then `launch_app`. Capture the terminal and click its pane once the shell prompt appears.
+2. Call `type_text` with `{"text":"한글 붙여넣기 확인 🌱🙂","paste_shortcut":"ctrl_shift_v"}`. Send one line with no trailing newline. Leave the text at the prompt without pressing Enter.
+3. Take a fresh screenshot and verify the Korean text and emoji on the same prompt line. If they have yet to appear, capture again before retrying.
+4. Call `desktop_stop` and confirm that `desktop_status` reports `stopped`. Exit the test Codex invocation to remove the temporary `PATH` directory.
+
 ## Verified environment
 
 | Component | Tested version |
@@ -97,6 +123,7 @@ The server gives Firefox a temporary home, and the Firefox flags start a separat
 | Rust | 1.100.0 |
 | Codex CLI | 0.171.0-alpha.13 |
 | GNOME Text Editor | 51.0 |
+| Ptyxis | 50.1 |
 
 The Codex test verified screenshots, coordinate clicks, shortcut keys, and Unicode input. The text editor saved the expected UTF-8 text, including a line break and an emoji. The included GTK smoke test also checks mouse movement, scrolling, stale frame rejection, and session cleanup. It needs Python with PyGObject, GTK 4, and Pillow:
 
@@ -137,7 +164,9 @@ The private desktop owns its Wayland socket, D-Bus, PipeWire, keyboard focus, an
 
 The runtime uses the installed Mutter executable directly. Docker, GNOME Shell extensions, Xwayland, RDP, and host screen-sharing permission are optional to the host and unnecessary for this server. Apps run with the invoking user's OS permissions and can access files and the network as that user. Choose an app you trust.
 
-The server stops the private session on `desktop_stop`, stdio closure, `SIGINT`, or `SIGTERM`. If the server is killed with `SIGKILL`, or an app moves into a separate process group, some processes may remain.
+Each MCP server process keeps at most one private desktop. Repeated `desktop_start` calls reuse a healthy desktop. Separate server processes can each own a desktop, and an idle server keeps its desktop until it receives a stop or shutdown request.
+
+Call `desktop_stop` before exiting Codex after a one-off task, then check for `stopped` with `desktop_status`. The server stops its app and desktop services and removes the temporary runtime directory. It also cleans up on EOF of its own stdio connection or on `SIGINT` or `SIGTERM`. Codex can exit without giving the MCP server time to clean up. Abrupt termination can leave processes and runtime files behind, and app descendants that leave the managed process group can outlive the session.
 
 ## License
 
