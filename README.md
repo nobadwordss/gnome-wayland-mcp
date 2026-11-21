@@ -17,11 +17,11 @@ sudo dnf install mutter dbus-daemon pipewire wireplumber gstreamer1 \
 
 ### Download the Linux x86_64 binary
 
-The [v0.2.0 release](https://github.com/nobadwordss/gnome-wayland-mcp/releases/tag/v0.2.0) provides a statically linked Linux x86_64 executable. You can install and run it without a Rust toolchain.
+The [v0.2.1 release](https://github.com/nobadwordss/gnome-wayland-mcp/releases/tag/v0.2.1) provides a statically linked Linux x86_64 executable. You can install and run it without a Rust toolchain.
 
 ```sh
-archive=gnome-wayland-mcp-v0.2.0-linux-x86_64.tar.gz
-release=https://github.com/nobadwordss/gnome-wayland-mcp/releases/download/v0.2.0
+archive=gnome-wayland-mcp-v0.2.1-linux-x86_64.tar.gz
+release=https://github.com/nobadwordss/gnome-wayland-mcp/releases/download/v0.2.1
 curl -fLO "$release/$archive" &&
   curl -fLO "$release/$archive.sha256" &&
   sha256sum -c "$archive.sha256" &&
@@ -87,7 +87,7 @@ The server gives Firefox a temporary home, and the Firefox flags start a separat
 
 ### Ptyxis example
 
-Use this example with GNOME's Ptyxis terminal installed at `/usr/bin/ptyxis`, Bash at `/usr/bin/bash`, and `gnome-wayland-mcp` v0.2.0 registered in Codex. Launch Codex with an argument override for this invocation. The temporary `PATH` lets Ptyxis start Bash directly inside the private session by omitting the optional `systemd-run` launcher.
+Use this example with GNOME's Ptyxis terminal installed at `/usr/bin/ptyxis`, Bash at `/usr/bin/bash`, and `gnome-wayland-mcp` v0.2.1 registered in Codex. Launch Codex with an argument override for this invocation. The temporary `PATH` lets Ptyxis start Bash directly inside the private session by omitting the optional `systemd-run` launcher.
 
 ```sh
 (
@@ -166,7 +166,7 @@ The runtime uses the installed Mutter executable directly. Docker, GNOME Shell e
 
 Each MCP server process keeps at most one private desktop. Repeated `desktop_start` calls reuse a healthy desktop. Separate server processes can each own a desktop, and an idle server keeps its desktop until it receives a stop or shutdown request.
 
-Call `desktop_stop` before exiting Codex after a one-off task, then check for `stopped` with `desktop_status`. The server stops its app and desktop services and removes the temporary runtime directory. It also cleans up on EOF of its own stdio connection or on `SIGINT` or `SIGTERM`. Codex can exit without giving the MCP server time to clean up. Abrupt termination can leave processes and runtime files behind, and app descendants that leave the managed process group can outlive the session.
+Use `desktop_stop` to release the desktop while Codex is open, then check for `stopped` with `desktop_status`. The server stops its app and desktop services and removes the temporary runtime directory. Cleanup also runs on stdio EOF, `SIGINT`, or `SIGTERM`. A separate worker owns the desktop and runs cleanup if Codex terminates the MCP launcher abruptly. A forced kill of the worker itself can leave processes and runtime files behind. App descendants that leave the managed process group can outlive the session.
 
 ## License
 

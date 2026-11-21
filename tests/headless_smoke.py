@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 from queue import Queue, Empty
+import shutil
 import signal
 import subprocess
 import sys
@@ -17,12 +18,13 @@ from PIL import Image
 
 
 class Client:
-    def __init__(self, binary, fixture, report, log):
+    def __init__(self, binary, fixture, report, log, *, own_process_group=False):
         self.process = subprocess.Popen(
             [binary, "--width", "960", "--height", "540", "--", sys.executable, fixture, report],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=log,
+            start_new_session=own_process_group,
             env={**os.environ, "WAYLAND_DISPLAY": "wrong-host-wayland", "WAYLAND_SOCKET": "99999",
                  "DISPLAY": ":999", "DBUS_SESSION_BUS_ADDRESS": "unix:path=/nonexistent-host-bus",
                  "PIPEWIRE_RUNTIME_DIR": "/nonexistent-host-pipewire"},
@@ -113,11 +115,15 @@ def point(frame, x, y):
     return {"frame_id": frame["frame_id"], "x": x, "y": y}
 
 
-def exercise(client, report):
+def initialize(client):
     init = client.send("initialize", {"protocolVersion": "2025-11-25", "capabilities": {},
                                       "clientInfo": {"name": "headless-smoke", "version": "1"}})
     assert init["serverInfo"]["name"] == "gnome-wayland-mcp"
     client.send("notifications/initialized", notification=True)
+
+
+def exercise(client, report):
+    initialize(client)
     tools = client.send("tools/list", {})["tools"]
     assert {tool["name"] for tool in tools} == {
         "desktop_start", "desktop_status", "desktop_stop", "launch_app", "screenshot",
@@ -213,6 +219,53 @@ def exercise(client, report):
     assert not Path(second["runtime"]).exists() and not Path(f"/proc/{second['pid']}").exists()
 
 
+def runtime_processes(runtime):
+    marker = os.fsencode(f"XDG_RUNTIME_DIR={runtime}")
+    live = set()
+    for process in Path("/proc").iterdir():
+        if process.name.isdigit():
+            try:
+                if marker in (process / "environ").read_bytes().split(b"\0"):
+                    live.add(int(process.name))
+            except (FileNotFoundError, ProcessLookupError, PermissionError):
+                continue
+    return live
+
+
+def exercise_launcher_loss(client, report):
+    initialize(client)
+    assert client.call("desktop_start")["status"] == "desktop_running"
+    assert client.call("launch_app")["status"] == "application_running"
+    app = poll(lambda: snapshot(report), lambda state: state.get("ready"), "GTK window for shutdown test")
+    runtime = Path(app["runtime"])
+    assert runtime.parent == Path("/tmp") and runtime.name.startswith("gwm-")
+    assert (runtime / "bus.conf").is_file()
+    assert app["pid"] in runtime_processes(runtime)
+
+    try:
+        # A client can discard the launcher with a signal that it cannot handle.
+        # Keep its stdin open so a graceful EOF cannot satisfy this test.
+        os.killpg(client.process.pid, signal.SIGKILL)
+        assert client.process.wait(timeout=5) == -signal.SIGKILL
+        poll(lambda: (runtime.exists(), runtime_processes(runtime)),
+             lambda state: state == (False, set()), "private desktop cleanup after SIGKILL")
+    finally:
+        # Keep a regression from leaving this test's private desktop alive.
+        for pid in runtime_processes(runtime):
+            try:
+                handle = os.pidfd_open(pid)
+                try:
+                    if pid in runtime_processes(runtime):
+                        signal.pidfd_send_signal(handle, signal.SIGKILL)
+                finally:
+                    os.close(handle)
+            except ProcessLookupError:
+                pass
+        if runtime.exists():
+            poll(lambda: runtime_processes(runtime), lambda live: not live, "test process teardown")
+            shutil.rmtree(runtime)
+
+
 def main():
     binary = str(Path(sys.argv[1]).resolve())
     fixture = str(Path(__file__).with_name("gtk_fixture.py").resolve())
@@ -228,7 +281,14 @@ def main():
                 raise
             finally:
                 client.close()
-    print("Passed: MCP, private sockets, PNG, pointer, click, scroll, keys, paste shortcuts and async insertion, stale frame, stop/restart, SIGTERM")
+
+            report = root / "crash.json"
+            client = Client(binary, fixture, report, log, own_process_group=True)
+            try:
+                exercise_launcher_loss(client, report)
+            finally:
+                client.close()
+    print("Passed: MCP, private sockets, PNG, pointer, click, scroll, keys, paste shortcuts and async insertion, stale frame, stop/restart, SIGTERM, launcher SIGKILL")
 
 
 if __name__ == "__main__":
