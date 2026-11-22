@@ -115,7 +115,11 @@ curl -fsSL https://raw.githubusercontent.com/nobadwordss/gnome-wayland-mcp/main/
   rm -f "$skill_file"
 ```
 
-Open a new Codex session and mention `$gnome-wayland-mcp` in your prompt.
+Open a new Codex session and describe the app task in your own words. Codex can select the skill when the request matches its description. You can also mention `$gnome-wayland-mcp` to select it explicitly. [Codex skill invocation](https://learn.chatgpt.com/docs/build-skills#how-chatgpt-and-codex-use-skills)
+
+> 내 화면과 마우스에 영향을 주지 않고 GNOME 텍스트 편집기를 열어 새 문서에 “봄바람 체크”와 “한글 입력 확인”을 한 줄씩 넣어줘. 앱 화면에서 두 줄을 확인한 뒤 저장 없이 테스트용 데스크톱을 종료하고 종료됐는지 확인해줘.
+
+Codex may ask for approval when it clicks, pastes, sends keys, or stops the private desktop. Review the tool and its target before approving. If Codex can open or capture the app but input is blocked, check the session's approval policy. A non-interactive `codex exec` session with `-a never` rejects tool calls that require approval. Use [`codex mcp get gnome-wayland-mcp`](#codex) to check the registered binary path, especially after installing a new release. [Codex approval settings](https://learn.chatgpt.com/docs/config-file/config-reference)
 
 ### Firefox example
 
@@ -185,6 +189,21 @@ cargo test --locked mutter::tests
 ```
 
 The server uses Mutter's private D-Bus interfaces, which can change between versions. The table records the versions used for end-to-end testing.
+
+### Codex automatic selection smoke test
+
+With the runtime and GTK smoke test dependencies installed, sign in to Codex CLI and run the following from this checkout. On Fedora, the fixture uses Noto Sans CJK KR from `google-noto-sans-cjk-vf-fonts` to display Korean syllables. You can also pass the verified v0.2.5 release executable as the first argument.
+
+```sh
+python3 -B tests/codex_routing_smoke.py target/release/gnome-wayland-mcp \
+  --model gpt-6.2-sol --reasoning-effort high
+```
+
+The script starts two fresh Codex sessions and supplies only this local MCP server. The GTK fixture keeps its window hidden through the first screenshot after launch. The GUI request passes when Codex captures the visible window before input, pastes the exact two Korean lines, takes a new screenshot, reports the code shown after input, and stops the desktop with a `stopped` status. The file-only request must return the second line of `sample.txt` with zero MCP calls. The printed artifact directory contains the prompts, JSONL events, and PNG evidence.
+
+The script stages the bundled skill in each temporary workspace by default. Add `--without-skill` to test tool selection with that skill disabled. It applies per-tool approval overrides for click, paste, key, and stop on the disposable server for each test invocation. Model, CLI version, and available tools can affect selection.
+
+On Fedora Workstation 45 with Mutter 51.1, v0.2.5 passed both requests in one run with the skill enabled and three runs with it disabled. These runs used Codex CLI 0.171.0-alpha.13 and `gpt-6.2-sol` with high reasoning effort.
 
 ### wbox comparison on Fedora
 

@@ -12,6 +12,7 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, GLib, Gtk
 
 report = Path(sys.argv[1])
+window_gate = Path(sys.argv[2]) if len(sys.argv) > 2 else None
 state = {
     "pid": os.getpid(),
     "runtime": os.environ["XDG_RUNTIME_DIR"],
@@ -41,7 +42,11 @@ def activate(app):
     stage = Gtk.Fixed()
     stage.add_css_class("stage")
     styles = Gtk.CssProvider()
-    styles.load_from_string(".stage { background-color: #26405a; }")
+    styles.load_from_string(
+        ".stage { background-color: #26405a; }"
+        ".screen-code { color: white; font-size: 22px; }"
+        '.routing-editor { font-family: "Noto Sans CJK KR", sans-serif; }'
+    )
     Gtk.StyleContext.add_provider_for_display(
         Gdk.Display.get_default(), styles, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
     )
@@ -73,10 +78,21 @@ def activate(app):
 
     editor = Gtk.TextView()
     editor.set_size_request(400, 100)
+    if window_gate is not None:
+        editor.add_css_class("routing-editor")
     buffer = editor.get_buffer()
-    buffer.connect("changed", lambda widget: update(
-        text=widget.get_text(widget.get_start_iter(), widget.get_end_iter(), False)
-    ))
+    screen_code = None
+    code_label = None
+
+    def record_edit(widget):
+        text = widget.get_text(widget.get_start_iter(), widget.get_end_iter(), False)
+        if code_label is not None:
+            lines = text.split("\n")
+            suffix = f" · Screen code: {screen_code}" if len(lines) == 2 and all(lines) else ""
+            code_label.set_text(f"GTK Text Editor{suffix}")
+        update(text=text)
+
+    buffer.connect("changed", record_edit)
     defer_paste = False
     pending_text = None
 
@@ -133,7 +149,6 @@ def activate(app):
 
     window.set_child(stage)
     window.fullscreen()
-    window.present()
 
     def ready():
         if window.get_width() < 850 or window.get_height() < 445:
@@ -141,7 +156,24 @@ def activate(app):
         update(ready=True, width=window.get_width(), height=window.get_height())
         return GLib.SOURCE_REMOVE
 
-    GLib.timeout_add(50, ready)
+    def show_window():
+        nonlocal screen_code, code_label
+        if window_gate is not None:
+            try:
+                screen_code = window_gate.read_text(encoding="utf-8").strip()
+            except FileNotFoundError:
+                return GLib.SOURCE_CONTINUE
+            code_label = Gtk.Label(label="GTK Text Editor")
+            code_label.add_css_class("screen-code")
+            stage.put(code_label, 450, 65)
+        window.present()
+        GLib.timeout_add(50, ready)
+        return GLib.SOURCE_REMOVE
+
+    if window_gate is None:
+        show_window()
+    else:
+        GLib.timeout_add(50, show_window)
 
 
 app = Gtk.Application(application_id="org.example.PrivateMcpSmokeTest")
