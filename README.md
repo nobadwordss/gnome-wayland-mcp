@@ -2,7 +2,7 @@
 
 Test native Linux GUI apps with an MCP agent on a separate GNOME Wayland display. The agent can launch a configured app, capture screenshots, click, and type while you keep using your regular desktop.
 
-[Linux runtime requirements](#requirements). End-to-end testing covers Codex on Fedora Workstation 45 (x86_64) with Mutter 51.1. Claude Code and Gemini CLI have standard local stdio setup examples.
+[Linux runtime requirements](#requirements). End-to-end testing covers Codex on Fedora Workstation 45 (x86_64) with Mutter 51.1. The GTK smoke test also passes on Ubuntu 26.04 LTS (x86_64) with a source build. Claude Code and Gemini CLI have standard local stdio setup examples.
 
 [Download for Linux x86_64](#download-the-linux-x86_64-binary) · [Codex](#codex) · [Claude Code](#claude-code) · [Gemini CLI](#gemini-cli)
 
@@ -21,9 +21,20 @@ sudo dnf install mutter dbus-daemon pipewire wireplumber gstreamer1 \
   pipewire-gstreamer gstreamer1-plugins-base gstreamer1-plugins-good gnome-text-editor
 ```
 
+On Ubuntu 26.04 LTS, install the distribution packages below and [build from source](#build-from-source). Mutter and GNOME Text Editor are available in Ubuntu's Universe repository.
+
+```sh
+sudo apt update
+sudo apt install mutter dbus-daemon pipewire wireplumber libgl1-mesa-dri \
+  gstreamer1.0-tools gstreamer1.0-pipewire gstreamer1.0-plugins-base \
+  gstreamer1.0-plugins-good gnome-text-editor
+```
+
+Ubuntu 24.04 LTS ships WirePlumber 0.4, below the required version.
+
 ### Download the Linux x86_64 binary
 
-The [v0.2.3 release](https://github.com/nobadwordss/gnome-wayland-mcp/releases/tag/v0.2.3) provides a statically linked Linux x86_64 executable. You can install and run it without a Rust toolchain.
+The [v0.2.3 release](https://github.com/nobadwordss/gnome-wayland-mcp/releases/tag/v0.2.3) provides a statically linked Linux x86_64 executable. You can install and run it without a Rust toolchain. This release predates the Ubuntu 26.04 clipboard fix.
 
 ```sh
 archive=gnome-wayland-mcp-v0.2.3-linux-x86_64.tar.gz
@@ -159,7 +170,9 @@ In that Codex session, use `$gnome-wayland-mcp` and follow these steps.
 | GNOME Text Editor | 51.0 |
 | Ptyxis | 50.1 |
 
-The Codex test verified screenshots, coordinate clicks, shortcut keys, and Unicode input. The text editor saved the expected UTF-8 text, including a line break and an emoji. To check compatibility on your host, run the included GTK smoke test. It also covers mouse movement, scrolling, stale frame rejection, and session cleanup. You need Python with PyGObject, GTK 4, and Pillow.
+The Codex test verified screenshots, coordinate clicks, shortcut keys, and Unicode input. The text editor saved the expected UTF-8 text, including a line break and an emoji.
+
+The GTK smoke test passes on Ubuntu 26.04 LTS (x86_64) with Mutter 50.1, PipeWire 1.6.2, WirePlumber 0.5.13, and GStreamer 1.28.2. It covers capture, mouse and keyboard input, repeated Unicode paste, stale frame rejection, and session cleanup. To run it on your host, install Python with PyGObject, GTK 4, and Pillow. On Ubuntu, install `python3-gi gir1.2-gtk-4.0 python3-pil` and use `/usr/bin/python3`.
 
 ```sh
 python3 -B tests/headless_smoke.py target/release/gnome-wayland-mcp

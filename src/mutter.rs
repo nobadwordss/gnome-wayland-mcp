@@ -19,7 +19,16 @@ const SCREEN_CAST: &str = "org.gnome.Mutter.ScreenCast";
 const SCREEN_CAST_PATH: &str = "/org/gnome/Mutter/ScreenCast";
 const CAST_SESSION: &str = "org.gnome.Mutter.ScreenCast.Session";
 const CAST_STREAM: &str = "org.gnome.Mutter.ScreenCast.Stream";
-const CLIPBOARD: &str = "org.gnome.Mutter.Clipboard";
+const CLIPBOARD: ClipboardApi = ClipboardApi {
+    interface: "org.gnome.Mutter.Clipboard",
+    enable: "Enable",
+    disable: "Disable",
+};
+const LEGACY_CLIPBOARD: ClipboardApi = ClipboardApi {
+    interface: REMOTE_SESSION,
+    enable: "EnableClipboard",
+    disable: "DisableClipboard",
+};
 const DBUS_TIMEOUT: Duration = Duration::from_secs(2);
 const STREAM_TIMEOUT: Duration = Duration::from_secs(7);
 const PASTE_TIMEOUT: Duration = Duration::from_secs(4);
@@ -31,8 +40,16 @@ pub(crate) struct Mutter {
     remote_path: OwnedObjectPath,
     stream_path: OwnedObjectPath,
     pub node: u32,
+    clipboard_api: ClipboardApi,
     clipboard_enabled: bool,
     clipboard_task: Option<ClipboardTask>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ClipboardApi {
+    interface: &'static str,
+    enable: &'static str,
+    disable: &'static str,
 }
 
 struct ClipboardTask {
@@ -125,6 +142,7 @@ impl Mutter {
             remote_path,
             stream_path,
             node,
+            clipboard_api: CLIPBOARD,
             clipboard_enabled: false,
             clipboard_task: None,
         })
@@ -198,6 +216,16 @@ impl Mutter {
             .await
     }
 
+    async fn clipboard_proxy(&self) -> zbus::Result<Proxy<'static>> {
+        Proxy::new_owned(
+            self.connection.clone(),
+            self.owner.clone(),
+            self.remote_path.clone(),
+            self.clipboard_api.interface,
+        )
+        .await
+    }
+
     async fn paste_with_timeout(
         &mut self,
         text: String,
@@ -205,27 +233,39 @@ impl Mutter {
         timeout: Duration,
     ) -> Result<()> {
         self.stop_clipboard_task().await;
-        let clipboard = Proxy::new_owned(
-            self.connection.clone(),
-            self.owner.clone(),
-            self.remote_path.clone(),
-            CLIPBOARD,
-        )
-        .await?;
+        let mut clipboard = self.clipboard_proxy().await?;
         let paste = async {
-            let options: HashMap<&str, Value<'_>> = HashMap::new();
+            let options = (HashMap::<&str, Value<'_>>::new(),);
             if self.clipboard_enabled {
                 // Retire the old source before subscribing. A late signal emitted
                 // for it during replacement has no source ID to match against.
                 clipboard
-                    .call::<_, _, ()>("SetSelection", &(options,))
+                    .call::<_, _, ()>("SetSelection", &options)
                     .await
                     .context("clear the previous private clipboard source")?;
             } else {
-                clipboard
-                    .call::<_, _, ()>("Enable", &(options,))
-                    .await
-                    .context("enable private clipboard")?;
+                let enabled = clipboard
+                    .call::<_, _, ()>(self.clipboard_api.enable, &options)
+                    .await;
+                match enabled {
+                    Err(zbus::Error::MethodError(name, _, _))
+                        if self.clipboard_api == CLIPBOARD
+                            && matches!(
+                                name.as_str(),
+                                "org.freedesktop.DBus.Error.UnknownInterface"
+                                    | "org.freedesktop.DBus.Error.UnknownMethod"
+                            ) =>
+                    {
+                        // Older Mutter exposes the entire clipboard API on the input session.
+                        self.clipboard_api = LEGACY_CLIPBOARD;
+                        clipboard = self.clipboard_proxy().await?;
+                        clipboard
+                            .call::<_, _, ()>(self.clipboard_api.enable, &options)
+                            .await
+                            .context("enable private clipboard on the remote desktop session")?;
+                    }
+                    result => result.context("enable private clipboard")?,
+                }
                 self.clipboard_enabled = true;
             }
 
@@ -273,7 +313,10 @@ impl Mutter {
         if paste.is_err() {
             self.stop_clipboard_task().await;
             if self.clipboard_enabled {
-                let disabled = clipboard.call::<_, _, ()>("Disable", &()).await.is_ok();
+                let disabled = clipboard
+                    .call::<_, _, ()>(self.clipboard_api.disable, &())
+                    .await
+                    .is_ok();
                 self.clipboard_enabled = !disabled;
             }
         }
