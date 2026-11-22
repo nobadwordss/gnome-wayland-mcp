@@ -186,6 +186,18 @@ cargo test --locked mutter::tests
 
 The server uses Mutter's private D-Bus interfaces, which can change between versions. The table records the versions used for end-to-end testing.
 
+### Native Wayland Electron smoke test
+
+The opt-in smoke test passed with Electron 45.4.1 on Fedora Workstation 45 and Ubuntu 26.04.1 LTS. It launches a decorated window with `--ozone-platform=wayland`, clicks positions from its screenshot, verifies focus and repeated Unicode paste, and checks process cleanup. It uses Electron's default sandbox and GPU settings.
+
+Install Python with Pillow and extract the Electron Linux x64 archive. Run the test with the paths to the MCP server and the Electron executable. [Electron 45.4.1 downloads](https://github.com/electron/electron/releases/tag/v45.4.1)
+
+```sh
+python3 -B tests/electron_smoke.py target/release/gnome-wayland-mcp /path/to/electron
+```
+
+The Ubuntu VM used the archive's Chromium sandbox helper with Ubuntu's default AppArmor policy. Extracted binaries can require sandbox setup on hosts that restrict unprivileged user namespaces. [Chromium's AppArmor documentation](https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md)
+
 ## MCP tools
 
 | Tool | What it does |

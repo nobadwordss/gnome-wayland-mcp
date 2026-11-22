@@ -19,9 +19,9 @@ from PIL import Image
 
 
 class Client:
-    def __init__(self, binary, fixture, report, log, *, own_process_group=False):
+    def __init__(self, binary, application, log, *, own_process_group=False):
         self.process = subprocess.Popen(
-            [binary, "--width", "960", "--height", "540", "--", sys.executable, fixture, report],
+            [binary, "--width", "960", "--height", "540", "--", *application],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=log,
@@ -67,7 +67,7 @@ class Client:
                 return reply["result"]
         raise AssertionError(f"Timed out waiting for {method}")
 
-    def call(self, tool, args=None, error=None):
+    def call(self, tool, args=None, error=None, *, inspect_frame=None):
         result = self.send("tools/call", {"name": tool, "arguments": args or {}})
         text = result["content"][0]["text"]
         if error is not None:
@@ -81,7 +81,10 @@ class Client:
             with Image.open(io.BytesIO(base64.b64decode(image["data"], validate=True))) as png:
                 png.load()
                 assert png.format == "PNG" and png.size == (960, 540)
-                output["pixel"] = png.convert("RGB").getpixel((30, 30))
+                pixels = png.convert("RGB")
+                output["pixel"] = pixels.getpixel((30, 30))
+                if inspect_frame is not None:
+                    output.update(inspect_frame(pixels))
         return output
 
     def close(self):
@@ -397,7 +400,7 @@ def main():
         root = Path(directory)
         log_path = root / "mcp.log"
         with log_path.open("w") as log:
-            client = Client(binary, fixture, root / "gtk.json", log)
+            client = Client(binary, [sys.executable, fixture, root / "gtk.json"], log)
             try:
                 exercise(client, root / "gtk.json")
             except Exception:
@@ -412,7 +415,7 @@ def main():
                 ("startup-eof", {"interrupt_start": True, "close_stdin": True}),
             ):
                 report = root / f"{scenario}.json"
-                client = Client(binary, fixture, report, log, own_process_group=True)
+                client = Client(binary, [sys.executable, fixture, report], log, own_process_group=True)
                 try:
                     exercise_launcher_loss(client, report, **options)
                 except Exception:
