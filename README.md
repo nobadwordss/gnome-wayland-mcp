@@ -186,6 +186,42 @@ cargo test --locked mutter::tests
 
 The server uses Mutter's private D-Bus interfaces, which can change between versions. The table records the versions used for end-to-end testing.
 
+### wbox comparison on Fedora
+
+This benchmark uses GNOME Wayland MCP v0.2.5 and wbox-mcp 0.15.0 on the same Fedora Workstation 45 x86_64 host with Mutter 51.1, GTK 4.24.1, and GStreamer 1.28.9. Both use headless Mutter, a 960×540 output, and the same GTK4 text field. The two wbox settings differ only in `timeouts.app_render`, which defaults to 3 seconds. [GNOME Wayland MCP v0.2.5](https://github.com/nobadwordss/gnome-wayland-mcp/releases/tag/v0.2.5) · [wbox 0.15.0](https://github.com/quazardous/wbox-mcp/tree/0de008ed922ebf9dc05c213fb047d6952d015474) · [wbox startup wait](https://github.com/quazardous/wbox-mcp/blob/0de008ed922ebf9dc05c213fb047d6952d015474/src/wbox/compositor/mutter.py#L246-L268)
+
+The runner starts a fresh MCP process and desktop each time. It runs each condition 12 times, using all six orders twice. Every condition uses the same GTK readiness check and first-PNG color marker. The runner then checks the exact Korean text in the GTK buffer, pauses the session's GStreamer capture process for 6 seconds, and expects an error during the pause. After resuming it checks for the new PNG marker and the same app PID and text. The run ends when the app, capture, desktop, and server have exited and the private runtime has been removed. GNOME Wayland MCP uses `type_text`. Both wbox settings use `clipboard_write` followed by `hold` for Ctrl+V. [Benchmark runner](benchmarks/wbox_mutter.py)
+
+| Metric | GNOME Wayland MCP v0.2.5 | wbox default (3 s) | wbox `app_render: 0` |
+| --- | ---: | ---: | ---: |
+| Failed trials | 0/12 | 0/12 | 0/12 |
+| First complete success | 8.29 s | 11.28 s | 8.92 s |
+| Complete run, median (min–max) | 8.23 s (8.16–8.29) | 11.22 s (11.10–11.32) | 8.92 s (8.84–9.14) |
+| MCP start to app launch reply, median | 1.20 s | 4.03 s | 0.95 s |
+| Launch reply to first verified app frame, median | 0.59 s | 0.23 s | 0.99 s |
+| MCP start to verified Korean paste, median | 1.81 s | 4.79 s | 2.46 s |
+| Capture error during the pause, median | 0.2 ms | 5.40 s | 5.40 s |
+| Resume to verified new PNG, median | 0.30 s | 0.26 s | 0.26 s |
+
+Complete times run from MCP process start to cleanup and include the 6-second pause. First complete success counts only elapsed trials for that condition through its first pass. All three passed on their first trial. Medians and ranges use successful trials. The expected error during the pause counts toward a pass.
+
+Setting the wbox wait to zero reduced the median complete run by 2.30 seconds. The median wait from the launch reply to the first verified app frame rose from 0.23 to 0.99 seconds. With the fixed wait disabled, the median complete run was 0.69 seconds longer than GNOME Wayland MCP in this benchmark. These measurements cover one GTK workload with an explicit readiness check on the wbox Mutter backend.
+
+For reproduction, install the [runtime dependencies](#requirements) and the Fedora packages `python3-gobject`, `python3-pillow`, `gtk4`, `pipewire-pulseaudio`, and `wl-clipboard`. Download and verify the v0.2.5 release archive using its accompanying SHA-256 file. With `uv` installed, run these commands from this repository.
+
+```sh
+bench_deps=$(mktemp -d)
+git clone https://github.com/quazardous/wbox-mcp.git "$bench_deps/wbox-mcp"
+git -C "$bench_deps/wbox-mcp" checkout --detach 0de008ed922ebf9dc05c213fb047d6952d015474
+uv sync --project "$bench_deps/wbox-mcp" --frozen --python 3.14.10
+uv pip install --python "$bench_deps/wbox-mcp/.venv/bin/python" 'jeepney==0.9.0'
+/usr/bin/python3 -B benchmarks/wbox_mutter.py \
+  /path/to/v0.2.5/gnome-wayland-mcp "$bench_deps/wbox-mcp/.venv/bin/wbox-mcp" \
+  --output "$bench_deps/results"
+```
+
+The runner writes `trials.jsonl`, server logs, and before/after PNGs to the new output directory. It records the stage and reason for each failed trial and writes `summary.json` at the end. If a trial fails, the exit status is nonzero. The runner stops early if it cannot verify session cleanup.
+
 ### Native Wayland Electron smoke test
 
 The opt-in smoke test passed with Electron 45.4.1 on Fedora Workstation 45 and Ubuntu 26.04.1 LTS. It launches a decorated window with `--ozone-platform=wayland`, clicks positions from its screenshot, verifies focus and repeated Unicode paste, and checks process cleanup. It uses Electron's default sandbox and GPU settings.
