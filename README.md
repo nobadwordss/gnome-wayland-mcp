@@ -213,6 +213,8 @@ The Ubuntu VM used the archive's Chromium sandbox helper with Ubuntu's default A
 | `type_text` | Pastes up to 16 KiB of UTF-8 from `{text}` into the focused editable field. Defaults to Ctrl+V. |
 | `desktop_stop` | Stops the desktop and the running app. |
 
+`desktop_status` includes an `application` object. Its `status` is `not_configured` when the server has no app command, `not_started` when a configured app has yet to launch in the current session, `running` while the app process is alive, or `exited` when it has terminated. For `exited`, the object includes `exit_code` for a process exit (including `0`) or `signal` for the Linux signal number. A successful relaunch replaces the previous process status, and stopping the desktop resets it. Use a screenshot to verify that a running process has opened its window.
+
 Screenshot coordinates start at the top-left pixel. Each pointer action uses the current `frame_id`. A new screenshot, app launch, or input invalidates earlier IDs. A `dispatched` response confirms delivery to Mutter. For `type_text`, Mutter also acknowledges a clipboard transfer and can request the text for its own clipboard cache. Use a fresh screenshot to verify that the app inserted the text before pressing Enter or replacing the clipboard with another `type_text` call.
 
 Pass `{"text":"Hello","paste_shortcut":"ctrl_shift_v"}` for apps whose paste shortcut is Ctrl+Shift+V. Omit `paste_shortcut`, pass `null`, or pass `"ctrl_v"` to use Ctrl+V.

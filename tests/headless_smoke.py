@@ -129,6 +129,68 @@ def initialize(client):
     client.send("notifications/initialized", notification=True)
 
 
+def exercise_application_status(binary, root, log):
+    unconfigured = Client(binary, [], log)
+    try:
+        initialize(unconfigured)
+        status = unconfigured.call("desktop_status")
+        assert status["status"] == "stopped" and not status["application_configured"]
+        assert status["application"] == {"status": "not_configured"}
+    finally:
+        unconfigured.close()
+
+    request = root / "app-exit"
+    program = """\
+from pathlib import Path
+import signal
+import sys
+import time
+
+request = Path(sys.argv[1])
+while not request.exists():
+    time.sleep(0.01)
+reason = request.read_text(encoding="utf-8")
+if reason == "term":
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    signal.raise_signal(signal.SIGTERM)
+sys.exit(int(reason))
+"""
+    client = Client(binary, [sys.executable, "-c", program, request], log)
+    try:
+        initialize(client)
+        not_started = {"status": "not_started"}
+        initial = client.call("desktop_status")
+        assert initial["status"] == "stopped" and initial["application"] == not_started
+        desktop = client.call("desktop_start")
+        assert desktop["status"] == "desktop_running" and "application" not in desktop
+        assert client.call("desktop_status") == {**desktop, "application": not_started}
+
+        for reason, termination in (
+            ("23", {"exit_code": 23}),
+            ("0", {"exit_code": 0}),
+            ("term", {"signal": signal.SIGTERM}),
+        ):
+            request.unlink(missing_ok=True)
+            running = {**desktop, "status": "application_running"}
+            assert client.call("launch_app") == running
+            assert client.call("desktop_status") == {**running, "application": {"status": "running"}}
+
+            pending = request.with_suffix(".tmp")
+            pending.write_text(reason, encoding="utf-8")
+            pending.replace(request)
+            exited = poll(lambda: client.call("desktop_status"),
+                          lambda state: state["application"]["status"] == "exited",
+                          f"application termination ({reason})")
+            assert exited == {**desktop, "application": {"status": "exited", **termination}}, exited
+            assert client.call("desktop_status") == exited
+
+        assert client.call("screenshot")["frame_id"]
+        assert client.call("desktop_stop") == {**desktop, "status": "stopped"}
+        assert client.call("desktop_status") == initial
+    finally:
+        client.close()
+
+
 def exercise(client, report):
     initialize(client)
     tools = client.send("tools/list", {})["tools"]
@@ -400,6 +462,12 @@ def main():
         root = Path(directory)
         log_path = root / "mcp.log"
         with log_path.open("w") as log:
+            try:
+                exercise_application_status(binary, root, log)
+            except Exception:
+                print(log_path.read_text(encoding="utf-8"), file=sys.stderr)
+                raise
+
             client = Client(binary, [sys.executable, fixture, root / "gtk.json"], log)
             try:
                 exercise(client, root / "gtk.json")
@@ -423,7 +491,7 @@ def main():
                     raise
                 finally:
                     client.close()
-    print("Passed: MCP, private sockets, PNG, pointer, click, scroll, keys, paste shortcuts and async insertion, stale frame, interrupted capture and recovery, stop/restart, SIGTERM, launcher loss, interrupted startup, worker exit")
+    print("Passed: MCP, application status and termination, private sockets, PNG, pointer, click, scroll, keys, paste shortcuts and async insertion, stale frame, interrupted capture and recovery, stop/restart, SIGTERM, launcher loss, interrupted startup, worker exit")
 
 
 if __name__ == "__main__":
