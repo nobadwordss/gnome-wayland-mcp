@@ -207,6 +207,7 @@ def exercise(client, report):
     client.call("press_key", {"key": "Backspace"})
     poll(lambda: snapshot(report), lambda state: state.get("text") == "", "GTK received Ctrl+A and Backspace")
 
+    exercise_capture_interruption(client, report, runtime)
     frame = client.call("screenshot")
     assert client.call("desktop_stop")["status"] == "stopped"
     assert not runtime.exists() and not Path(f"/proc/{app['pid']}").exists()
@@ -234,6 +235,69 @@ def runtime_processes(runtime):
             except (FileNotFoundError, ProcessLookupError, PermissionError):
                 continue
     return live
+
+
+def exercise_capture_interruption(client, report, runtime):
+    original = client.call("screenshot")
+    still = client.call("screenshot")
+    assert original["pixel"] == still["pixel"] == (38, 64, 90)
+    assert original["frame_id"] != still["frame_id"]
+    client.call("mouse_click", {"point": point(still, 170, 135)})
+    poll(lambda: snapshot(report), lambda state: state["clicks"] == 2, "click on a static screen")
+
+    def pause_capture():
+        (pid,) = [pid for pid in runtime_processes(runtime)
+                  if Path(f"/proc/{pid}/exe").readlink() == Path("/usr/bin/gst-launch-1.0")]
+        handle = os.pidfd_open(pid)
+        try:
+            signal.pidfd_send_signal(handle, signal.SIGSTOP)
+            def state():
+                return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+            poll(state, lambda value: value == "T", "private capture stopped")
+        except BaseException:
+            signal.pidfd_send_signal(handle, signal.SIGCONT)
+            os.close(handle)
+            raise
+        return handle
+
+    frame = client.call("screenshot")
+    handle = pause_capture()
+    try:
+        client.call("mouse_click", {"point": point(frame, 170, 135)}, error="private capture is paused")
+        client.call("press_key", {"key": "F7"})
+        poll(lambda: snapshot(report), lambda state: state.get("target_replaced"), "GTK replaced the click target")
+        result = client.send("tools/call", {"name": "screenshot", "arguments": {}})
+        assert result.get("isError") is True and len(result["content"]) == 1
+        error = result["content"][0]
+        assert error["type"] == "text" and "private capture is paused" in error["text"]
+        assert "frame_id" not in error["text"]
+        effects = snapshot(report)
+        assert effects["clicks"] == 2 and effects.get("replacement_clicks", 0) == 0
+    finally:
+        signal.pidfd_send_signal(handle, signal.SIGCONT)
+        os.close(handle)
+
+    recovered = client.call("screenshot")
+    assert recovered["pixel"] == (97, 45, 69)
+    client.call("mouse_click", {"point": point(frame, 170, 135)}, error="stale or unknown")
+    client.call("mouse_click", {"point": point(recovered, 170, 135)})
+    poll(lambda: snapshot(report), lambda state: state.get("replacement_clicks") == 1,
+         "click on the replacement target after capture resumes")
+
+    # Detect stop/continue even when no tool was called while it was stopped,
+    # and obtain a fresh frame without changing the static app.
+    frame = client.call("screenshot")
+    handle = pause_capture()
+    try:
+        signal.pidfd_send_signal(handle, signal.SIGCONT)
+    finally:
+        os.close(handle)
+    client.call("mouse_click", {"point": point(frame, 170, 135)}, error="private capture was interrupted")
+    recovered = client.call("screenshot")
+    assert recovered["pixel"] == (97, 45, 69)
+    client.call("mouse_click", {"point": point(recovered, 170, 135)})
+    poll(lambda: snapshot(report), lambda state: state.get("replacement_clicks") == 2,
+         "click on static screen after unobserved capture interruption")
 
 
 def children(pid):
@@ -356,7 +420,7 @@ def main():
                     raise
                 finally:
                     client.close()
-    print("Passed: MCP, private sockets, PNG, pointer, click, scroll, keys, paste shortcuts and async insertion, stale frame, stop/restart, SIGTERM, launcher loss, interrupted startup, worker exit")
+    print("Passed: MCP, private sockets, PNG, pointer, click, scroll, keys, paste shortcuts and async insertion, stale frame, interrupted capture and recovery, stop/restart, SIGTERM, launcher loss, interrupted startup, worker exit")
 
 
 if __name__ == "__main__":

@@ -339,6 +339,16 @@ impl State {
             Action::Screenshot => {
                 let desktop = ready(&mut self.desktop)?;
                 desktop.frame = None;
+                if desktop.capture.was_interrupted()? {
+                    // Open a new reader rather than trusting any PNG still
+                    // buffered in the interrupted pipeline.
+                    let capture = desktop
+                        .runtime
+                        .start_capture(desktop.mutter.node, size, stopping)
+                        .await?;
+                    let mut old = std::mem::replace(&mut desktop.capture, capture);
+                    old.stop().await;
+                }
                 let png = desktop.capture.screenshot().await?;
                 let frame_id = Uuid::new_v4();
                 desktop.frame = Some(frame_id);
@@ -502,7 +512,7 @@ impl Desktop {
             "point is outside the screenshot"
         );
         self.frame = None;
-        Ok(())
+        self.capture.require_uninterrupted()
     }
 }
 

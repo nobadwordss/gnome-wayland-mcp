@@ -54,6 +54,23 @@ def activate(app):
     button.add_controller(motion)
     stage.put(button, 100, 100)
 
+    replacement = Gtk.Button(label="Replacement target")
+    replacement.set_size_request(180, 70)
+    replacement.connect("clicked", lambda _: update(replacement_clicks=state.get("replacement_clicks", 0) + 1))
+
+    def replace_target(_controller, keyval, _keycode, _modifiers):
+        if keyval != Gdk.KEY_F7:
+            return False
+        styles.load_from_string(".stage { background-color: #612d45; }")
+        stage.remove(button)
+        stage.put(replacement, 100, 100)
+        update(target_replaced=True)
+        return True
+
+    window_keys = Gtk.EventControllerKey()
+    window_keys.connect("key-pressed", replace_target)
+    window.add_controller(window_keys)
+
     editor = Gtk.TextView()
     editor.set_size_request(400, 100)
     buffer = editor.get_buffer()

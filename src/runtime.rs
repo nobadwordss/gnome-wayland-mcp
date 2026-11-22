@@ -419,8 +419,37 @@ impl Capture {
         Ok(())
     }
 
-    pub async fn screenshot(&mut self) -> Result<Arc<[u8]>> {
+    pub fn was_interrupted(&self) -> Result<bool> {
         self.check()?;
+        // Leave stop/continue events waitable so an interruption remains
+        // visible until this capture is replaced, even if it already resumed.
+        let event = waitid(
+            WaitId::Pid(self.process.pid),
+            WaitIdOptions::STOPPED
+                | WaitIdOptions::CONTINUED
+                | WaitIdOptions::NOHANG
+                | WaitIdOptions::NOWAIT,
+        )?;
+        if let Some(event) = event {
+            ensure!(
+                event.continued(),
+                "private capture is paused; take a new screenshot after it resumes"
+            );
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    pub fn require_uninterrupted(&self) -> Result<()> {
+        ensure!(
+            !self.was_interrupted()?,
+            "private capture was interrupted; take a new screenshot"
+        );
+        Ok(())
+    }
+
+    pub async fn screenshot(&mut self) -> Result<Arc<[u8]>> {
+        self.require_uninterrupted()?;
         self.frames.borrow_and_update();
         // A static monitor may produce no new frame. The existing frame is
         // still available while the same live stream owns its coordinates.
@@ -428,6 +457,7 @@ impl Capture {
             let reason = self.read_error().await;
             bail!("private capture stream closed: {reason}");
         }
+        self.require_uninterrupted()?;
         self.frames
             .borrow_and_update()
             .clone()

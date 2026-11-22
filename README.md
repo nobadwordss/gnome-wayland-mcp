@@ -23,11 +23,11 @@ sudo dnf install mutter dbus-daemon pipewire wireplumber gstreamer1 \
 
 ### Download the Linux x86_64 binary
 
-The [v0.2.2 release](https://github.com/nobadwordss/gnome-wayland-mcp/releases/tag/v0.2.2) provides a statically linked Linux x86_64 executable. You can install and run it without a Rust toolchain.
+The [v0.2.3 release](https://github.com/nobadwordss/gnome-wayland-mcp/releases/tag/v0.2.3) provides a statically linked Linux x86_64 executable. You can install and run it without a Rust toolchain.
 
 ```sh
-archive=gnome-wayland-mcp-v0.2.2-linux-x86_64.tar.gz
-release=https://github.com/nobadwordss/gnome-wayland-mcp/releases/download/v0.2.2
+archive=gnome-wayland-mcp-v0.2.3-linux-x86_64.tar.gz
+release=https://github.com/nobadwordss/gnome-wayland-mcp/releases/download/v0.2.3
 curl -fLO "$release/$archive" &&
   curl -fLO "$release/$archive.sha256" &&
   sha256sum -c "$archive.sha256" &&
@@ -121,7 +121,7 @@ The server gives Firefox a temporary home, and the Firefox flags start a separat
 
 ### Ptyxis example
 
-Use this example with GNOME's Ptyxis terminal installed at `/usr/bin/ptyxis`, Bash at `/usr/bin/bash`, and `gnome-wayland-mcp` v0.2.2 registered in Codex. Launch Codex with an argument override for this invocation. The temporary `PATH` lets Ptyxis start Bash directly inside the private session by omitting the optional `systemd-run` launcher.
+Use this example with GNOME's Ptyxis terminal installed at `/usr/bin/ptyxis`, Bash at `/usr/bin/bash`, and `gnome-wayland-mcp` v0.2.2 or later registered in Codex. Launch Codex with an argument override for this invocation. The temporary `PATH` lets Ptyxis start Bash directly inside the private session by omitting the optional `systemd-run` launcher.
 
 ```sh
 (
