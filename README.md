@@ -2,7 +2,7 @@
 
 Test native Linux GUI apps with an MCP agent on a separate GNOME Wayland display. The agent can launch a configured app, capture screenshots, click, and type while you keep using your regular desktop.
 
-[Linux runtime requirements](#requirements). End-to-end testing covers Codex on Fedora Workstation 45 (x86_64) with Mutter 51.1. The GTK smoke test also passes on Ubuntu 26.04 LTS (x86_64) with a source build. Claude Code and Gemini CLI have standard local stdio setup examples.
+[Linux runtime requirements](#requirements). End-to-end testing covers Codex on Fedora Workstation 45 (x86_64) with Mutter 51.1. The release binary also passes the GTK smoke test on Ubuntu 26.04 LTS (x86_64) with Mutter 50.1. Claude Code and Gemini CLI have standard local stdio setup examples.
 
 [Download for Linux x86_64](#download-the-linux-x86_64-binary) · [Codex](#codex) · [Claude Code](#claude-code) · [Gemini CLI](#gemini-cli)
 
@@ -21,11 +21,11 @@ sudo dnf install mutter dbus-daemon pipewire wireplumber gstreamer1 \
   pipewire-gstreamer gstreamer1-plugins-base gstreamer1-plugins-good gnome-text-editor
 ```
 
-On Ubuntu 26.04 LTS, install the distribution packages below and [build from source](#build-from-source). Mutter and GNOME Text Editor are available in Ubuntu's Universe repository.
+On Ubuntu 26.04 LTS, install the distribution packages below, then [download the Linux x86_64 binary](#download-the-linux-x86_64-binary). Mutter and GNOME Text Editor are available in Ubuntu's Universe repository.
 
 ```sh
 sudo apt update
-sudo apt install mutter dbus-daemon pipewire wireplumber libgl1-mesa-dri \
+sudo apt install curl mutter dbus-daemon pipewire wireplumber libgl1-mesa-dri \
   gstreamer1.0-tools gstreamer1.0-pipewire gstreamer1.0-plugins-base \
   gstreamer1.0-plugins-good gnome-text-editor
 ```
@@ -34,11 +34,11 @@ Ubuntu 24.04 LTS ships WirePlumber 0.4, below the required version.
 
 ### Download the Linux x86_64 binary
 
-The [v0.2.3 release](https://github.com/nobadwordss/gnome-wayland-mcp/releases/tag/v0.2.3) provides a statically linked Linux x86_64 executable. You can install and run it without a Rust toolchain. This release predates the Ubuntu 26.04 clipboard fix.
+The [v0.2.4 release](https://github.com/nobadwordss/gnome-wayland-mcp/releases/tag/v0.2.4) provides a statically linked Linux x86_64 executable. You can install and run it without a Rust toolchain.
 
 ```sh
-archive=gnome-wayland-mcp-v0.2.3-linux-x86_64.tar.gz
-release=https://github.com/nobadwordss/gnome-wayland-mcp/releases/download/v0.2.3
+archive=gnome-wayland-mcp-v0.2.4-linux-x86_64.tar.gz
+release=https://github.com/nobadwordss/gnome-wayland-mcp/releases/download/v0.2.4
 curl -fLO "$release/$archive" &&
   curl -fLO "$release/$archive.sha256" &&
   sha256sum -c "$archive.sha256" &&
