@@ -9,7 +9,7 @@ use rmcp::{
     tool, tool_handler, tool_router,
 };
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -38,6 +38,20 @@ struct Desktop {
     mutter: Mutter,
     runtime: Runtime,
     frame: Option<Uuid>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum ApplicationStatus {
+    NotConfigured,
+    NotStarted,
+    Running,
+    Exited {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        signal: Option<i32>,
+    },
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -225,7 +239,7 @@ impl Server {
     }
 
     #[tool(
-        description = "Report the private desktop and configured application status.",
+        description = "Report the private desktop and application status, including the app's exit code or signal after termination.",
         annotations(open_world_hint = false, read_only_hint = true)
     )]
     async fn desktop_status(&self) -> CallToolResult {
@@ -313,18 +327,18 @@ impl State {
             Action::Start => {
                 if let Some(desktop) = &mut self.desktop {
                     if desktop.check().is_ok() {
-                        return Ok(message(self.status()?));
+                        return Ok(message(self.status(false)?));
                     }
                     self.stop().await;
                 }
                 self.desktop = Some(Desktop::start(size, stopping).await?);
-                Ok(message(self.status()?))
+                Ok(message(self.status(false)?))
             }
             Action::Stop => {
                 self.stop().await;
-                Ok(message(self.status()?))
+                Ok(message(self.status(false)?))
             }
-            Action::Status => Ok(message(self.status()?)),
+            Action::Status => Ok(message(self.status(true)?)),
             Action::Launch => {
                 let program = self.program.as_ref().ok_or_else(|| {
                     anyhow!("configure an application in the server arguments after --")
@@ -334,7 +348,7 @@ impl State {
                     desktop.frame = None;
                     desktop.application = Some(desktop.runtime.launch(program)?);
                 }
-                Ok(message(self.status()?))
+                Ok(message(self.status(false)?))
             }
             Action::Screenshot => {
                 let desktop = ready(&mut self.desktop)?;
@@ -418,23 +432,45 @@ impl State {
         }
     }
 
-    fn status(&mut self) -> Result<Value> {
-        let state = match &mut self.desktop {
-            Some(desktop) => {
-                if desktop.check().is_err() {
-                    "failed"
-                } else if desktop.app_running()? {
-                    "application_running"
-                } else {
-                    "desktop_running"
-                }
-            }
+    fn status(&self, include_application: bool) -> Result<Value> {
+        let mut state = match &self.desktop {
+            Some(desktop) if desktop.check().is_err() => "failed",
+            Some(_) => "desktop_running",
             None => "stopped",
         };
-        Ok(
-            json!({ "status": state, "mode": "headless", "application_configured": self.program.is_some(),
-            "width": self.size.width, "height": self.size.height }),
-        )
+        let application = (include_application || state == "desktop_running")
+            .then(|| self.application_status())
+            .transpose()?;
+        if state == "desktop_running" && matches!(application, Some(ApplicationStatus::Running)) {
+            state = "application_running";
+        }
+        let mut status = json!({ "status": state, "mode": "headless", "application_configured": self.program.is_some(),
+            "width": self.size.width, "height": self.size.height });
+        if include_application {
+            status["application"] = json!(application);
+        }
+        Ok(status)
+    }
+
+    fn application_status(&self) -> Result<ApplicationStatus> {
+        let application = self
+            .desktop
+            .as_ref()
+            .and_then(|desktop| desktop.application.as_ref());
+        let Some(application) = application else {
+            return Ok(if self.program.is_some() {
+                ApplicationStatus::NotStarted
+            } else {
+                ApplicationStatus::NotConfigured
+            });
+        };
+        Ok(match application.exit_state()? {
+            None => ApplicationStatus::Running,
+            Some(status) => ApplicationStatus::Exited {
+                exit_code: status.exit_status(),
+                signal: status.terminating_signal(),
+            },
+        })
     }
 
     async fn stop(&mut self) {

@@ -358,7 +358,7 @@ impl Process {
         Ok(())
     }
 
-    fn exit_state(&self) -> Result<Option<WaitIdStatus>> {
+    pub(crate) fn exit_state(&self) -> Result<Option<WaitIdStatus>> {
         // Keep the process-group leader waitable until we have stopped its group.
         Ok(waitid(
             WaitId::Pid(self.pid),
