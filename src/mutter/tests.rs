@@ -21,7 +21,7 @@ use zbus::{
     zvariant::{self, OwnedObjectPath, OwnedValue},
 };
 
-use super::{DBUS_TIMEOUT, Mutter, TEXT_MIME_TYPES};
+use super::{CLIPBOARD, ClipboardApi, DBUS_TIMEOUT, LEGACY_CLIPBOARD, Mutter, TEXT_MIME_TYPES};
 
 const SESSION_PATH: &str = "/org/gnome/Mutter/RemoteDesktop/Session/Test";
 const TEST_TIMEOUT: Duration = Duration::from_millis(250);
@@ -79,34 +79,7 @@ impl FakeClipboard {
         options: HashMap<String, OwnedValue>,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> fdo::Result<()> {
-        if !self.enabled {
-            return Err(fdo::Error::Failed("Clipboard not enabled".into()));
-        }
-        // The old selection can still be requested while the client replaces it.
-        // By the time the signal is handled, Mutter has invalidated that serial.
-        if self.selection.is_some() {
-            self.serial += 1;
-            Self::selection_transfer(&emitter, TEXT_MIME_TYPES[0], self.serial).await?;
-        }
-        let Some(mime_types) = options.get("mime-types") else {
-            self.selection = None;
-            self.events.lock().await.push(Event::Clear);
-            return Ok(());
-        };
-        let offered: Vec<String> = mime_types
-            .try_clone()
-            .and_then(TryInto::try_into)
-            .map_err(|error| fdo::Error::InvalidArgs(error.to_string()))?;
-        assert_eq!(offered, TEXT_MIME_TYPES);
-        self.events.lock().await.push(Event::Select);
-        self.serial += 1;
-        let next = self.script.pop_front().expect("unexpected SetSelection");
-        self.selection = Some(next);
-        if next != Selection::Silent {
-            // A new cache request can reach the client before SetSelection returns.
-            Self::selection_transfer(&emitter, TEXT_MIME_TYPES[0], self.serial).await?;
-        }
-        Ok(())
+        self.select(options, &emitter, CLIPBOARD).await
     }
 
     #[zbus(signal)]
@@ -156,12 +129,109 @@ impl FakeClipboard {
     }
 }
 
-struct FakeKeyboard;
+impl FakeClipboard {
+    async fn select(
+        &mut self,
+        options: HashMap<String, OwnedValue>,
+        emitter: &SignalEmitter<'_>,
+        api: ClipboardApi,
+    ) -> fdo::Result<()> {
+        if !self.enabled {
+            return Err(fdo::Error::Failed("Clipboard not enabled".into()));
+        }
+        // The old selection can still be requested while the client replaces it.
+        // By the time the signal is handled, Mutter has invalidated that serial.
+        if self.selection.is_some() {
+            self.serial += 1;
+            emitter
+                .emit(
+                    api.interface,
+                    "SelectionTransfer",
+                    &(TEXT_MIME_TYPES[0], self.serial),
+                )
+                .await?;
+        }
+        let Some(mime_types) = options.get("mime-types") else {
+            self.selection = None;
+            self.events.lock().await.push(Event::Clear);
+            return Ok(());
+        };
+        let offered: Vec<String> = mime_types
+            .try_clone()
+            .and_then(TryInto::try_into)
+            .map_err(|error| fdo::Error::InvalidArgs(error.to_string()))?;
+        assert_eq!(offered, TEXT_MIME_TYPES);
+        self.events.lock().await.push(Event::Select);
+        self.serial += 1;
+        let next = self.script.pop_front().expect("unexpected SetSelection");
+        self.selection = Some(next);
+        if next != Selection::Silent {
+            // A new cache request can reach the client before SetSelection returns.
+            emitter
+                .emit(
+                    api.interface,
+                    "SelectionTransfer",
+                    &(TEXT_MIME_TYPES[0], self.serial),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+}
+
+struct FakeRemoteSession(Option<FakeClipboard>);
 
 #[zbus::interface(name = "org.gnome.Mutter.RemoteDesktop.Session")]
-impl FakeKeyboard {
+impl FakeRemoteSession {
     fn notify_keyboard_keycode(&self, _code: u32, _pressed: bool) {}
     fn notify_keyboard_keysym(&self, _keysym: u32, _pressed: bool) {}
+
+    async fn enable_clipboard(&mut self, options: HashMap<String, OwnedValue>) -> fdo::Result<()> {
+        self.clipboard()?.enable(options).await
+    }
+
+    async fn disable_clipboard(&mut self) -> fdo::Result<()> {
+        self.clipboard()?.disable().await
+    }
+
+    async fn set_selection(
+        &mut self,
+        options: HashMap<String, OwnedValue>,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) -> fdo::Result<()> {
+        self.clipboard()?
+            .select(options, &emitter, LEGACY_CLIPBOARD)
+            .await
+    }
+
+    async fn selection_write(&mut self, serial: u32) -> fdo::Result<zvariant::OwnedFd> {
+        self.clipboard()?.selection_write(serial).await
+    }
+
+    async fn selection_write_done(&mut self, serial: u32, success: bool) -> fdo::Result<()> {
+        self.clipboard()?
+            .selection_write_done(serial, success)
+            .await
+    }
+}
+
+impl FakeRemoteSession {
+    fn clipboard(&mut self) -> fdo::Result<&mut FakeClipboard> {
+        self.0
+            .as_mut()
+            .ok_or_else(|| fdo::Error::Failed("Unexpected use of the legacy clipboard".into()))
+    }
+}
+
+struct DeniedClipboard;
+
+#[zbus::interface(name = "org.gnome.Mutter.Clipboard")]
+impl DeniedClipboard {
+    fn enable(&self, _options: HashMap<String, OwnedValue>) -> fdo::Result<()> {
+        Err(fdo::Error::AccessDenied(
+            "Clipboard denied by test policy".into(),
+        ))
+    }
 }
 
 struct TestBus {
@@ -174,6 +244,13 @@ struct TestBus {
 
 impl TestBus {
     async fn new(script: impl IntoIterator<Item = Selection>) -> Result<Self> {
+        Self::with_clipboard(CLIPBOARD, script).await
+    }
+
+    async fn with_clipboard(
+        api: ClipboardApi,
+        script: impl IntoIterator<Item = Selection>,
+    ) -> Result<Self> {
         let dir = tempfile::tempdir()?;
         let address = format!("unix:path={}", dir.path().join("bus").display());
         let mut daemon = Command::new("/usr/bin/dbus-daemon")
@@ -195,21 +272,23 @@ impl TestBus {
             .context("private bus did not announce its address")?;
 
         let events = Events::default();
-        let service = Builder::address(address.as_str())?
-            .serve_at(
-                SESSION_PATH,
-                FakeClipboard {
-                    script: script.into_iter().collect(),
-                    events: events.clone(),
-                    enabled: false,
-                    serial: 0,
-                    selection: None,
-                    pending: None,
-                },
-            )?
-            .serve_at(SESSION_PATH, FakeKeyboard)?
-            .build()
-            .await?;
+        let clipboard = FakeClipboard {
+            script: script.into_iter().collect(),
+            events: events.clone(),
+            enabled: false,
+            serial: 0,
+            selection: None,
+            pending: None,
+        };
+        let builder = Builder::address(address.as_str())?;
+        let builder = if api == LEGACY_CLIPBOARD {
+            builder.serve_at(SESSION_PATH, FakeRemoteSession(Some(clipboard)))?
+        } else {
+            builder
+                .serve_at(SESSION_PATH, FakeRemoteSession(None))?
+                .serve_at(SESSION_PATH, clipboard)?
+        };
+        let service = builder.build().await?;
         let connection = Builder::address(address.as_str())?
             .method_timeout(DBUS_TIMEOUT)
             .build()
@@ -224,6 +303,7 @@ impl TestBus {
             stream_path: remote_path.clone(),
             remote_path,
             node: 0,
+            clipboard_api: CLIPBOARD,
             clipboard_enabled: false,
             clipboard_task: None,
         };
@@ -270,6 +350,56 @@ impl TestBus {
     async fn events(&self) -> Vec<Event> {
         std::mem::take(&mut *self.events.lock().await)
     }
+}
+
+#[tokio::test]
+async fn legacy_clipboard_replaces_text_and_recovers_after_timeout() -> Result<()> {
+    let mut bus = TestBus::with_clipboard(
+        LEGACY_CLIPBOARD,
+        [Selection::Ready, Selection::Silent, Selection::Ready],
+    )
+    .await?;
+    bus.paste("previous clipboard").await?;
+    let error = bus.paste("no receiver").await.unwrap_err();
+    assert!(
+        error.to_string().contains("no private clipboard transfer"),
+        "{error:#}"
+    );
+    bus.paste(TEST_TEXT).await?;
+    assert_eq!(
+        bus.events().await,
+        [
+            Event::Enable,
+            Event::Select,
+            Event::Write(1),
+            Event::Done(1, true, b"previous clipboard".to_vec()),
+            Event::Clear,
+            Event::Select,
+            Event::Disable,
+            Event::Enable,
+            Event::Select,
+            Event::Write(4),
+            Event::Done(4, true, TEST_TEXT.as_bytes().to_vec()),
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn clipboard_access_denied_does_not_fall_back() -> Result<()> {
+    let mut bus = TestBus::with_clipboard(LEGACY_CLIPBOARD, [Selection::Ready]).await?;
+    bus.service
+        .object_server()
+        .at(SESSION_PATH, DeniedClipboard)
+        .await?;
+    let error = bus.paste(TEST_TEXT).await.unwrap_err();
+    assert!(
+        matches!(error.downcast_ref::<zbus::Error>(), Some(zbus::Error::MethodError(name, _, _))
+        if name.as_str() == "org.freedesktop.DBus.Error.AccessDenied"),
+        "{error:#}"
+    );
+    assert!(bus.events().await.is_empty());
+    Ok(())
 }
 
 #[tokio::test]
