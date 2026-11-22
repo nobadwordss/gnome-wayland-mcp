@@ -34,11 +34,11 @@ Ubuntu 24.04 LTS ships WirePlumber 0.4, below the required version.
 
 ### Download the Linux x86_64 binary
 
-The [v0.2.5 release](https://github.com/nobadwordss/gnome-wayland-mcp/releases/tag/v0.2.5) provides a statically linked Linux x86_64 executable. You can install and run it without a Rust toolchain.
+The [v0.2.6 release](https://github.com/nobadwordss/gnome-wayland-mcp/releases/tag/v0.2.6) provides a statically linked Linux x86_64 executable. You can install and run it without a Rust toolchain.
 
 ```sh
-archive=gnome-wayland-mcp-v0.2.5-linux-x86_64.tar.gz
-release=https://github.com/nobadwordss/gnome-wayland-mcp/releases/download/v0.2.5
+archive=gnome-wayland-mcp-v0.2.6-linux-x86_64.tar.gz
+release=https://github.com/nobadwordss/gnome-wayland-mcp/releases/download/v0.2.6
 curl -fLO "$release/$archive" &&
   curl -fLO "$release/$archive.sha256" &&
   sha256sum -c "$archive.sha256" &&
