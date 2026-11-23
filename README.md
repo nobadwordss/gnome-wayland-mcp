@@ -4,7 +4,7 @@ Test native Linux GUI apps with an MCP agent on a separate GNOME Wayland display
 
 [Linux runtime requirements](#requirements). End-to-end testing covers Codex on Fedora Workstation 45 (x86_64) with Mutter 51.1. The release binary also passes the GTK smoke test on Ubuntu 26.04 LTS (x86_64) with Mutter 50.1. Claude Code and Gemini CLI have standard local stdio setup examples.
 
-[Download for Linux x86_64](#download-the-linux-x86_64-binary) · [Codex](#codex) · [Claude Code](#claude-code) · [Gemini CLI](#gemini-cli)
+[Install for Codex](#install-for-codex) · [Download for Linux x86_64](#download-the-linux-x86_64-binary) · [Claude Code](#claude-code) · [Gemini CLI](#gemini-cli)
 
 ![Codex opens GNOME Text Editor, clicks New Document, pastes a multiline checklist with an emoji, and finds a match with Ctrl+F](docs/gnome-text-editor-demo.gif)
 
@@ -21,7 +21,7 @@ sudo dnf install mutter dbus-daemon pipewire wireplumber gstreamer1 \
   pipewire-gstreamer gstreamer1-plugins-base gstreamer1-plugins-good gnome-text-editor
 ```
 
-On Ubuntu 26.04 LTS, install the distribution packages below, then [download the Linux x86_64 binary](#download-the-linux-x86_64-binary). Mutter and GNOME Text Editor are available in Ubuntu's Universe repository.
+On Ubuntu 26.04 LTS, install the distribution packages below. Mutter and GNOME Text Editor are available in Ubuntu's Universe repository.
 
 ```sh
 sudo apt update
@@ -31,6 +31,19 @@ sudo apt install curl mutter dbus-daemon pipewire wireplumber libgl1-mesa-dri \
 ```
 
 Ubuntu 24.04 LTS ships WirePlumber 0.4, below the required version.
+
+### Install for Codex
+
+With the Codex CLI on your `PATH`, run this on Linux x86_64 as your regular user.
+
+```sh
+curl -fsSLo install-codex.sh https://raw.githubusercontent.com/nobadwordss/gnome-wayland-mcp/main/scripts/install-codex.sh &&
+  bash install-codex.sh
+```
+
+From a checkout, run `bash scripts/install-codex.sh`. The installer checks for the desktop runtime and GNOME Text Editor, downloads and verifies the `v0.2.6` archive, and installs the executable under `~/.local/share/gnome-wayland-mcp/v0.2.6/`. It registers `gnome-wayland-mcp` for GNOME Text Editor and prints the result of `codex mcp get`. If an entry with that name is already configured, the installer reports it and exits. Use [manual registration](#codex) if you want to choose a different executable or app.
+
+Open a **new Codex chat** and follow the [first-run example](#try-it). The skill is optional.
 
 ### Download the Linux x86_64 binary
 
@@ -61,6 +74,8 @@ cargo build --locked --release
 Use a client that launches local stdio servers and passes image tool results to the model. The examples assume the downloaded binary is in `~/.local/bin`. If you built from source, use the absolute path to `target/release/gnome-wayland-mcp`.
 
 ### Codex
+
+Use manual registration with a downloaded or locally built binary. If you used the installer, go directly to [Try it](#try-it).
 
 ```sh
 codex mcp add gnome-wayland-mcp -- "$HOME/.local/bin/gnome-wayland-mcp" \
@@ -97,15 +112,17 @@ Run `gemini mcp list` to check the connection. See the [Gemini CLI MCP configura
 
 ## Try it
 
-Open a new session in your MCP client and try this prompt with the GNOME Text Editor configuration above.
+Open a new session in your MCP client. With the GNOME Text Editor registration above, try this prompt without installing the skill.
 
-> Use the `gnome-wayland-mcp` tools to start the private desktop and launch GNOME Text Editor. Take a screenshot, click the editing area, and enter “Hello from the private desktop.” Take a new screenshot to verify the text, then stop the desktop.
+> Open GNOME Text Editor on a separate desktop without moving my mouse or taking keyboard focus from my desktop. Wait until you can see the editor, then open a new document and enter “Hello from the private desktop” and “한글 입력 확인” on separate lines. Take a fresh screenshot and verify both lines. Close the private desktop without saving and confirm that it has stopped.
+
+If the tools are unavailable in the new chat, run `codex mcp get gnome-wayland-mcp` to check the registration and executable path. Codex may ask for approval before clicking, pasting, sending keys, or stopping the private desktop. Review the tool and its target before approving. If the server can open or capture the app but input is blocked, check the session's approval policy. A non-interactive `codex exec` session with `-a never` rejects tool calls that require approval. [Codex approval settings](https://learn.chatgpt.com/docs/config-file/config-reference)
 
 To launch a different app, replace the executable and arguments after the server's `--` separator. Use an absolute path to a native Wayland executable. The default resolution is 1280 × 800. Pass `--width` and `--height` before the server's `--` to change it.
 
-## Codex skill
+## Optional Codex skill
 
-Install the [`$gnome-wayland-mcp` skill](skills/gnome-wayland-mcp/SKILL.md) for guidance on running an app in the private desktop, capturing its screen, and verifying mouse and keyboard input. Follow the [Codex registration steps](#codex), then install the skill in your Codex user directory.
+After [installing for Codex](#install-for-codex) or [registering manually](#codex), you can add the [`$gnome-wayland-mcp` skill](skills/gnome-wayland-mcp/SKILL.md) for reusable guidance on running apps in the private desktop and verifying mouse and keyboard input.
 
 ```sh
 skill_file="$(mktemp)" &&
@@ -118,8 +135,6 @@ curl -fsSL https://raw.githubusercontent.com/nobadwordss/gnome-wayland-mcp/main/
 Open a new Codex session and describe the app task in your own words. Codex can select the skill when the request matches its description. You can also mention `$gnome-wayland-mcp` to select it explicitly. [Codex skill invocation](https://learn.chatgpt.com/docs/build-skills#how-chatgpt-and-codex-use-skills)
 
 > 내 화면과 마우스에 영향을 주지 않고 GNOME 텍스트 편집기를 열어 새 문서에 “봄바람 체크”와 “한글 입력 확인”을 한 줄씩 넣어줘. 앱 화면에서 두 줄을 확인한 뒤 저장 없이 테스트용 데스크톱을 종료하고 종료됐는지 확인해줘.
-
-Codex may ask for approval when it clicks, pastes, sends keys, or stops the private desktop. Review the tool and its target before approving. If Codex can open or capture the app but input is blocked, check the session's approval policy. A non-interactive `codex exec` session with `-a never` rejects tool calls that require approval. Use [`codex mcp get gnome-wayland-mcp`](#codex) to check the registered binary path, especially after installing a new release. [Codex approval settings](https://learn.chatgpt.com/docs/config-file/config-reference)
 
 ### Firefox example
 
