@@ -19,17 +19,34 @@ skip_if_registered() {
     fi
 }
 
+if [[ ${1-} == --help || ${1-} == -h ]]; then
+    printf '%s\n' 'Usage: install-codex.sh [-- /absolute/path/to/app [ARG...]]' \
+        'With no arguments, use GNOME Text Editor if installed. Use -- alone for a desktop without an app.'
+    exit 0
+fi
+
 [[ $(uname -sm) == 'Linux x86_64' ]] || fail 'This installer requires Linux x86_64.'
 command -v codex >/dev/null || fail 'Install the Codex CLI or put it on PATH first.'
 
 codex mcp list --json >/dev/null || fail 'Could not read the Codex MCP configuration.'
 skip_if_registered
 
+if (($# == 0)) && [[ -x /usr/bin/gnome-text-editor ]]; then
+    set -- /usr/bin/gnome-text-editor --standalone
+elif [[ ${1-} == -- ]]; then
+    shift
+fi
+app_args=()
+if (($#)); then
+    [[ $1 == /* && -f $1 && -x $1 ]] || fail "Expected an absolute path to an executable app, got '$1'."
+    app_args=(-- "$@")
+fi
+
 missing=()
 for command in curl sha256sum tar; do
     command -v "$command" >/dev/null || missing+=("$command")
 done
-for executable in dbus-daemon pipewire wireplumber mutter gst-launch-1.0 gst-inspect-1.0 gnome-text-editor; do
+for executable in dbus-daemon pipewire wireplumber mutter gst-launch-1.0 gst-inspect-1.0; do
     [[ -x /usr/bin/$executable ]] || missing+=("/usr/bin/$executable")
 done
 if ((${#missing[@]})); then
@@ -81,7 +98,10 @@ binary=$install_dir/$server
 )
 
 skip_if_registered
-codex mcp add "$server" -- "$binary" -- /usr/bin/gnome-text-editor --standalone ||
+codex mcp add "$server" -- "$binary" "${app_args[@]}" ||
     fail "Could not register $server with Codex. The verified binary is at $binary."
 codex mcp get "$server" || fail "Could not verify the Codex registration for $server."
+if ((${#app_args[@]} == 0)); then
+    printf '\nNo app configured. Use desktop_start, screenshot and desktop_stop to try the private display.\n'
+fi
 printf '\nOpen a new Codex chat and follow the first-run example in the README.\n'

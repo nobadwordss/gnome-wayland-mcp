@@ -22,7 +22,7 @@ Use the registered `gnome-wayland-mcp` server for this workflow. It controls app
 
 ## Ptyxis example
 
-Use the [Ptyxis launch command](https://github.com/nobadwordss/gnome-wayland-mcp#ptyxis-example) to open a Codex invocation configured for Ptyxis. It uses a temporary `PATH` and starts Bash directly in the private session. Start the desktop, launch Ptyxis, and click the terminal pane after the prompt appears.
+Use the [Ptyxis launch command](https://github.com/nobadwordss/gnome-wayland-mcp/blob/main/docs/setup.md#ptyxis-example) to open a Codex invocation configured for Ptyxis. It uses a temporary `PATH` and starts Bash directly in the private session. Start the desktop, launch Ptyxis, and click the terminal pane after the prompt appears.
 
 Call `type_text` with `{"text":"한글 붙여넣기 확인 🌱🙂","paste_shortcut":"ctrl_shift_v"}`. Keep the sample on one line with no trailing newline. Capture the pending text at the shell prompt without pressing Enter.
 
