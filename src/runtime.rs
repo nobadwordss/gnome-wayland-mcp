@@ -31,6 +31,7 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(8);
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(8);
 const FRAME_WAIT: Duration = Duration::from_millis(350);
 const MAX_PNG_BYTES: usize = 10 * 1024 * 1024;
+pub(crate) const GTK_DOUBLE_CLICK_TIME: Duration = Duration::from_millis(400);
 
 #[derive(Clone, Copy)]
 pub(crate) struct Size {
@@ -258,6 +259,17 @@ impl PrivateEnv {
         for name in ["home", "config", "cache", "data", "state"] {
             fs::create_dir(root.join(name))?;
         }
+        // This desktop has no settings portal. Give GTK and the input dispatcher
+        // the same multi-click window, including on systems with a GTK override.
+        let gtk_config = root.join("config/gtk-4.0");
+        fs::create_dir(&gtk_config)?;
+        fs::write(
+            gtk_config.join("settings.ini"),
+            format!(
+                "[Settings]\ngtk-double-click-time={}\n",
+                GTK_DOUBLE_CLICK_TIME.as_millis()
+            ),
+        )?;
         // Take control of the core config so host drop-ins cannot add hardware discovery.
         let pipewire_config = root.join("config/pipewire");
         fs::create_dir(&pipewire_config)?;

@@ -30,17 +30,24 @@ def text_rows(pixels):
 def exercise_selection(client, report):
     frame = poll(lambda: client.call("screenshot"), lambda f: f["pixel"] == (38, 64, 90), "GTK visible")
     client.call("mouse_click", {"point": point(frame, 700, 150), "count": 1})
-    body = "bravo\nalpha bravo\ncharlie"
+    body = "bravo delta\nalpha bravo\ncharlie"
     client.call("type_text", {"text": body})
     poll(lambda: snapshot(report), lambda s: s["text"] == body, "GTK text inserted")
     frame = poll(lambda: client.call("screenshot", inspect_frame=text_rows),
                  lambda f: len(f["lines"]) >= 3, "rendered lines")
-    first = frame["lines"][0]
-    click = {"point": point(frame, 460, first)}
+    # Place the caret at the far end of the rendered line. The following
+    # double-click must start its own sequence even on a fast runner.
+    caret = {"point": point(frame, 700, frame["lines"][0])}
     for count in (0, 3):
-        client.call("mouse_click", {**click, "count": count}, error="count must be 1 or 2")
+        client.call("mouse_click", {**caret, "count": count}, error="count must be 1 or 2")
+    client.call("mouse_click", caret)
+    frame = client.call("screenshot", inspect_frame=text_rows)
+    click = {"point": point(frame, 460, frame["lines"][0])}
     assert client.call("mouse_click", {**click, "count": 2})["status"] == "dispatched"
-    poll(lambda: snapshot(report), lambda s: s.get("selected") == "bravo", "double-click selected bravo")
+    selection = poll(lambda: snapshot(report),
+                     lambda s: s.get("selected") == "bravo"
+                     and [p["count"] for p in s.get("editor_presses", [])[-2:]] == [1, 2],
+                     "GTK recognized a double-click and selected bravo")
     client.call("mouse_click", click, error="stale or unknown")
 
     client.call("press_key", {"key": "End"})
@@ -53,7 +60,8 @@ def exercise_selection(client, report):
     assert client.call("mouse_drag", drag)["status"] == "dispatched"
     poll(lambda: snapshot(report), lambda s: s.get("selected") == "alpha bravo", "reverse drag selection")
     client.call("mouse_drag", drag, error="stale or unknown")
-    print("Passed GTK selection: double-click 'bravo', reverse drag 'alpha bravo'", flush=True)
+    print(f"GTK selected 'bravo' with presses {selection['editor_presses'][-3:]} "
+          "and 'alpha bravo' with a reverse drag", flush=True)
 
 
 def exercise_disconnect(client, report, app, *, drag):

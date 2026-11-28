@@ -8,7 +8,7 @@ The v0.2.7 Linux x86_64 release executable passed all three tests on Fedora Work
 
 `headless_smoke.py` checks the desktop, application and capture status while a session is running, paused or interrupted. It removes the private PipeWire link, immediately sends a click with the previous frame ID, and checks the first recovery PNG and GTK application PID. It repeats the check with the old capture process held open. `click_disconnect.py` disconnects after the last pre-press graph snapshot or after the button press appears on D-Bus. It checks the MCP response, D-Bus events, GTK button counters and the first recovered PNG.
 
-`pointer_gestures.py` checks that a double-click selects `bravo` and a right-to-left drag selects `alpha bravo`. It also verifies button release after a capture interruption and suppression of a late second click.
+`pointer_gestures.py` places the caret at the far end of `bravo delta`, takes a fresh screenshot, then immediately double-clicks `bravo`. It checks that the text view's own GTK recognizer counted the presses as 1 and 2 and that exactly `bravo` was selected. On failure the fixture reports recent press counts, coordinates, event times and the selected text. The test also checks right-to-left drag selection of `alpha bravo`, button release after a capture interruption and suppression of a late second click.
 
 Install Python with PyGObject, GTK 4, Pillow, the PipeWire utilities and `dbus-monitor`. On Ubuntu, install `python3-gi gir1.2-gtk-4.0 python3-pil pipewire-bin dbus-bin` and use `/usr/bin/python3`. On Fedora, the PipeWire utilities are in `pipewire-utils`.
 

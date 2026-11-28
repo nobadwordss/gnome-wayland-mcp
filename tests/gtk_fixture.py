@@ -124,6 +124,17 @@ def activate(app):
             update(selected=selected)
 
     buffer.connect("mark-set", record_selection)
+
+    def record_press(gesture, count, x, y):
+        press = {"count": count, "time_ms": gesture.get_current_event_time(),
+                 "x": round(x), "y": round(y)}
+        update(editor_presses=[*state.get("editor_presses", [])[-3:], press])
+
+    # Observe the text view's own recognizer without adding a competing gesture.
+    for controller in editor.observe_controllers():
+        if isinstance(controller, Gtk.GestureClick):
+            controller.connect_after("pressed", record_press)
+
     defer_paste = False
     pending_text = None
 
