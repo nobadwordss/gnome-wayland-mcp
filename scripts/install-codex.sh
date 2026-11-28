@@ -2,7 +2,7 @@
 set -euo pipefail
 
 server=gnome-wayland-mcp
-version=0.2.7
+version=0.2.8
 archive=$server-v$version-linux-x86_64.tar.gz
 release=https://github.com/nobadwordss/gnome-wayland-mcp/releases/download/v$version
 requirements=https://github.com/nobadwordss/gnome-wayland-mcp#requirements

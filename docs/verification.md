@@ -4,7 +4,7 @@
 
 For release verification, run the GTK, click-delivery, and pointer gesture tests against the same executable on Ubuntu 26.04 and Fedora Workstation. The Ubuntu CI job also runs all three tests on a source build. Run the commands below from the repository root. [Ubuntu CI workflow](../.github/workflows/ubuntu-smoke.yml)
 
-The v0.2.7 Linux x86_64 release executable passed all three tests on Fedora Workstation 45 (Mutter 51.1, PipeWire 1.6.12) and Ubuntu 26.04.1 LTS (Mutter 50.1, PipeWire 1.6.2).
+The v0.2.8 Linux x86_64 release executable passed all three tests on Fedora Workstation 45 (Mutter 51.1, PipeWire 1.6.12) and Ubuntu 26.04.1 LTS (Mutter 50.1, PipeWire 1.6.2).
 
 `headless_smoke.py` checks the desktop, application and capture status while a session is running, paused or interrupted. It removes the private PipeWire link, immediately sends a click with the previous frame ID, and checks the first recovery PNG and GTK application PID. It repeats the check with the old capture process held open. `click_disconnect.py` disconnects after the last pre-press graph snapshot or after the button press appears on D-Bus. It checks the MCP response, D-Bus events, GTK button counters and the first recovered PNG.
 

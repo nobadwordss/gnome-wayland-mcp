@@ -42,7 +42,7 @@ bash scripts/install-codex.sh -- /usr/bin/firefox --no-remote --new-instance abo
 
 Pass `--` alone to explicitly register a desktop without an app. For the published installer and editor demo, you can also [download the installer](docs/setup.md#download-the-codex-installer).
 
-The installer verifies the archive's SHA-256 checksum and the executable's version, then installs v0.2.7 under `~/.local/share/gnome-wayland-mcp/v0.2.7/`. This release includes double-click, drag, and capture recovery. The installer keeps existing Codex entries. To add another app, register the binary under a second name. [Build and registration commands](docs/setup.md)
+The installer verifies the archive's SHA-256 checksum and the executable's version, then installs v0.2.8 under `~/.local/share/gnome-wayland-mcp/v0.2.8/`. The installer keeps existing Codex entries. To add another app, register the binary under a second name. [Build and registration commands](docs/setup.md)
 
 ## Try it
 
@@ -92,7 +92,7 @@ Each MCP server process keeps at most one private desktop. Repeated `desktop_sta
 
 The server checks the original capture link's serial and active state before issuing a `frame_id` or pressing a button. It watches that link with `pw-dump --monitor`. If it detects capture loss before the first press starts, it rejects the gesture. If it detects loss after a press may have reached Mutter, it stops the remaining gesture, attempts the matching release and reports possible delivery. If a gesture reports possible delivery, inspect a fresh screenshot before taking further action.
 
-On `main` after v0.2.7, an explicit double-click starts a new click sequence. If the same button was used recently, the server waits out the remainder of the private GTK 4 desktop's 400 ms recognition interval before the first press. Once the first press starts, the server allows up to 200 ms to start the second.
+Starting with v0.2.8, an explicit double-click starts a new click sequence. If the same button was used recently, the server waits out the remainder of the private GTK 4 desktop's 400 ms recognition interval before the first press. Once the first press starts, the server allows up to 200 ms to start the second.
 
 Use `desktop_stop` to release the desktop while the MCP client is open, then check for `stopped` with `desktop_status`. The server stops its app and desktop services and removes the temporary runtime directory. Cleanup also runs on stdio EOF, `SIGINT`, or `SIGTERM`. A separate worker owns the desktop and runs cleanup if the client terminates the MCP launcher abruptly. Shutdown interrupts desktop startup and waits for any services already launched to exit before removing the runtime directory. A forced kill of the worker itself can leave processes and runtime files behind. App descendants that leave the managed process group can outlive the session.
 
