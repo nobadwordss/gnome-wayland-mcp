@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use anyhow::{Result, anyhow, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -13,14 +13,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::{
     sync::Mutex,
-    time::{Instant, sleep, timeout_at},
+    time::{Instant, sleep, sleep_until, timeout_at},
 };
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
     mutter::Mutter,
-    runtime::{Capture, CaptureHealth, Process, Program, Runtime, Size},
+    runtime::{Capture, CaptureHealth, GTK_DOUBLE_CLICK_TIME, Process, Program, Runtime, Size},
 };
 
 #[derive(Clone)]
@@ -40,6 +40,7 @@ struct Desktop {
     capture: Capture,
     mutter: Mutter,
     runtime: Runtime,
+    double_click_ready_at: HashMap<Button, Instant>,
 }
 
 #[derive(Serialize)]
@@ -67,7 +68,7 @@ struct Point {
     y: u32,
 }
 
-#[derive(Clone, Copy, Default, Deserialize, JsonSchema)]
+#[derive(Clone, Copy, Default, Deserialize, Eq, Hash, JsonSchema, PartialEq)]
 #[serde(rename_all = "snake_case")]
 enum Button {
     #[default]
@@ -603,6 +604,7 @@ impl Desktop {
                 capture,
                 mutter,
                 runtime,
+                double_click_ready_at: HashMap::new(),
             }),
             Err(error) => {
                 runtime.stop().await;
@@ -678,6 +680,21 @@ impl Desktop {
         let mut started = false;
         let result = async {
             self.begin_pointer(point, size).await?;
+            if matches!(gesture, ButtonGesture::DoubleClick)
+                && let Some(&ready_at) = self.double_click_ready_at.get(&button)
+                && ready_at > Instant::now()
+            {
+                // GTK may still be counting a previous click on this button,
+                // even at another position. Separate the two native gestures.
+                let link = self.capture.link_interrupted();
+                tokio::select! {
+                    biased;
+                    _ = stopping.cancelled() => bail!("private desktop server is shutting down"),
+                    _ = link.cancelled() => bail!("private capture was interrupted; take a new screenshot"),
+                    _ = sleep_until(ready_at) => {}
+                }
+                self.capture.require_uninterrupted(&self.runtime).await?;
+            }
             self.move_pointer(point.x, point.y).await?;
             self.capture.require_uninterrupted(&self.runtime).await?;
             let link = self.capture.link_interrupted();
@@ -714,6 +731,10 @@ impl Desktop {
             self.capture.require_uninterrupted(&self.runtime).await
         }
         .await;
+        if started {
+            self.double_click_ready_at
+                .insert(button, Instant::now() + GTK_DOUBLE_CLICK_TIME);
+        }
         if let Err(error) = result {
             let (not_sent, uncertain) = match gesture {
                 ButtonGesture::Click => {
