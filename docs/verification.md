@@ -24,7 +24,7 @@ The clipboard integration tests run against a disposable D-Bus daemon and pass r
 cargo test --locked mutter::tests
 ```
 
-To check installer changes, run `python3 -B tests/install_codex.py` with Codex CLI on your `PATH` and access to the GitHub release assets. It verifies the default app choice, custom arguments, desktop-only setup, and preservation of an existing entry using temporary user configurations.
+To check installer changes, run `python3 -B tests/install_codex.py` with Codex CLI on your `PATH` and access to the GitHub release assets. Temporary user configurations cover the default app choice, custom arguments, desktop-only setup, and reinstalling with the same entry name. The test also checks preservation of other MCP entries, including an explicit empty argument list and an integer timeout.
 
 ## Tested environments
 

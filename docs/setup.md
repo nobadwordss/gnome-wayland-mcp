@@ -2,10 +2,10 @@
 
 ## Download the Codex installer
 
-On Linux x86_64 with Codex CLI installed, run the published installer as your regular user.
+On Linux x86_64 with the Codex CLI and Python 3 installed, run the installer as your regular user. The installer uses the Codex app server's `config/value/write` API to add a single MCP entry.
 
 ```sh
-curl -fsSLo install-codex.sh https://raw.githubusercontent.com/nobadwordss/gnome-wayland-mcp/v0.2.8/scripts/install-codex.sh &&
+curl -fsSLo install-codex.sh https://raw.githubusercontent.com/nobadwordss/gnome-wayland-mcp/main/scripts/install-codex.sh &&
   bash install-codex.sh
 ```
 

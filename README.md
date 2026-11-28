@@ -32,7 +32,7 @@ The editor demo uses the optional `gnome-text-editor` package. You can use anoth
 
 ### Install for Codex
 
-On Linux x86_64 with the Codex CLI on your `PATH`, run `bash scripts/install-codex.sh` from this checkout as your regular user. The installer selects GNOME Text Editor if installed. Otherwise you get a desktop you can start and capture without an app.
+On Linux x86_64 with `codex` and `python3` on your `PATH`, run `bash scripts/install-codex.sh` from this checkout as your regular user. The installer selects GNOME Text Editor if installed. Otherwise you get a desktop you can start and capture without an app.
 
 To choose an app on the first run, pass its absolute executable path and arguments. For example, on a host with native Firefox installed at `/usr/bin/firefox`, use this command.
 
