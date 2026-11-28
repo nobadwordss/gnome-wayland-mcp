@@ -2,7 +2,7 @@
 set -euo pipefail
 
 server=gnome-wayland-mcp
-version=0.2.6
+version=0.2.7
 archive=$server-v$version-linux-x86_64.tar.gz
 release=https://github.com/nobadwordss/gnome-wayland-mcp/releases/download/v$version
 requirements=https://github.com/nobadwordss/gnome-wayland-mcp#requirements
@@ -46,7 +46,7 @@ missing=()
 for command in curl sha256sum tar; do
     command -v "$command" >/dev/null || missing+=("$command")
 done
-for executable in dbus-daemon pipewire wireplumber mutter gst-launch-1.0 gst-inspect-1.0; do
+for executable in dbus-daemon pipewire pw-dump wireplumber mutter gst-launch-1.0 gst-inspect-1.0; do
     [[ -x /usr/bin/$executable ]] || missing+=("/usr/bin/$executable")
 done
 if ((${#missing[@]})); then
@@ -66,11 +66,16 @@ mkdir -p -- "$install_dir"
 stage=$(mktemp -d "$install_dir/.install.XXXXXXXX")
 trap 'rm -rf -- "$stage"' EXIT
 
-for element in pipewiresrc queue videorate videoconvert pngenc fdsink; do
-    env -i PATH=/usr/bin HOME="$stage" GST_REGISTRY="$stage/gstreamer-registry.bin" \
-        /usr/bin/gst-inspect-1.0 --exists "$element" ||
+inspect=(env -i PATH=/usr/bin HOME="$stage" LC_ALL=C
+    GST_REGISTRY="$stage/gstreamer-registry.bin" /usr/bin/gst-inspect-1.0)
+for element in queue videorate videoconvert pngenc fdsink; do
+    "${inspect[@]}" --exists "$element" ||
         fail "Missing GStreamer element '$element'. See $requirements"
 done
+pipewiresrc_info=$("${inspect[@]}" pipewiresrc) ||
+    fail "Missing GStreamer element 'pipewiresrc'. See $requirements"
+[[ $pipewiresrc_info == *GST_PIPEWIRE_SRC_ON_DISCONNECT_ERROR* ]] ||
+    fail "GStreamer pipewiresrc must support on-disconnect=error. See $requirements"
 
 binary=$install_dir/$server
 (

@@ -2,15 +2,20 @@
 
 ## Ubuntu and Fedora GTK regressions
 
-Use the same GTK and click-delivery regressions on Ubuntu 26.04 and Fedora Workstation for release verification. Both passed with the same server binary on Ubuntu 26.04.1 LTS (Mutter 50.1, PipeWire 1.6.2) and Fedora Workstation 45 (Mutter 51.1, PipeWire 1.6.11) using the distribution packages. The [Ubuntu CI job](../.github/workflows/ubuntu-smoke.yml) runs both tests. Run the commands below from the repository root.
+For release verification, run the GTK, click-delivery, and pointer gesture tests against the same executable on Ubuntu 26.04 and Fedora Workstation. The Ubuntu CI job also runs all three tests on a source build. Run the commands below from the repository root. [Ubuntu CI workflow](../.github/workflows/ubuntu-smoke.yml)
+
+The v0.2.7 Linux x86_64 release executable passed all three tests on Fedora Workstation 45 (Mutter 51.1, PipeWire 1.6.12) and Ubuntu 26.04.1 LTS (Mutter 50.1, PipeWire 1.6.2).
 
 `headless_smoke.py` checks the desktop, application and capture status while a session is running, paused or interrupted. It removes the private PipeWire link, immediately sends a click with the previous frame ID, and checks the first recovery PNG and GTK application PID. It repeats the check with the old capture process held open. `click_disconnect.py` disconnects after the last pre-press graph snapshot or after the button press appears on D-Bus. It checks the MCP response, D-Bus events, GTK button counters and the first recovered PNG.
+
+`pointer_gestures.py` checks that a double-click selects `bravo` and a right-to-left drag selects `alpha bravo`. It also verifies button release after a capture interruption and suppression of a late second click.
 
 Install Python with PyGObject, GTK 4, Pillow, the PipeWire utilities and `dbus-monitor`. On Ubuntu, install `python3-gi gir1.2-gtk-4.0 python3-pil pipewire-bin dbus-bin` and use `/usr/bin/python3`. On Fedora, the PipeWire utilities are in `pipewire-utils`.
 
 ```sh
 python3 -B tests/headless_smoke.py target/release/gnome-wayland-mcp
 python3 -B tests/click_disconnect.py target/release/gnome-wayland-mcp
+python3 -B tests/pointer_gestures.py target/release/gnome-wayland-mcp
 ```
 
 The clipboard integration tests run against a disposable D-Bus daemon and pass real Unix file descriptors. They exercise late transfer signals, missing transfers, and stalled clipboard writes. Run them with the Rust toolchain and `/usr/bin/dbus-daemon` installed.
@@ -29,7 +34,7 @@ The server uses Mutter's private D-Bus interfaces. The following versions were u
 | --- | --- |
 | OS | Fedora Workstation 45, x86_64 |
 | GNOME Shell and Mutter | 51.1 |
-| PipeWire | 1.6.11 |
+| PipeWire | 1.6.11, 1.6.12 |
 | WirePlumber | 0.5.19 |
 | GStreamer | 1.28.9 |
 | Rust | 1.100.0 |

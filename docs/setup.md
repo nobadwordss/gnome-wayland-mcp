@@ -5,17 +5,17 @@
 On Linux x86_64 with Codex CLI installed, run the published installer as your regular user.
 
 ```sh
-curl -fsSLo install-codex.sh https://raw.githubusercontent.com/nobadwordss/gnome-wayland-mcp/main/scripts/install-codex.sh &&
+curl -fsSLo install-codex.sh https://raw.githubusercontent.com/nobadwordss/gnome-wayland-mcp/v0.2.7/scripts/install-codex.sh &&
   bash install-codex.sh
 ```
 
 ## Download the Linux x86_64 binary
 
-The [v0.2.6 release](https://github.com/nobadwordss/gnome-wayland-mcp/releases/tag/v0.2.6) provides a statically linked Linux x86_64 executable. You can install and run it without a Rust toolchain.
+The [v0.2.7 release](https://github.com/nobadwordss/gnome-wayland-mcp/releases/tag/v0.2.7) provides a statically linked Linux x86_64 executable. You can install and run it without a Rust toolchain.
 
 ```sh
-archive=gnome-wayland-mcp-v0.2.6-linux-x86_64.tar.gz
-release=https://github.com/nobadwordss/gnome-wayland-mcp/releases/download/v0.2.6
+archive=gnome-wayland-mcp-v0.2.7-linux-x86_64.tar.gz
+release=https://github.com/nobadwordss/gnome-wayland-mcp/releases/download/v0.2.7
 curl -fLO "$release/$archive" &&
   curl -fLO "$release/$archive.sha256" &&
   sha256sum -c "$archive.sha256" &&
@@ -26,7 +26,7 @@ curl -fLO "$release/$archive" &&
 ## Build from source
 
 Use Rust 1.91 or later to build the server from a checkout.
-The checkout requires a GStreamer `pipewiresrc` with `on-disconnect=error` and `/usr/bin/pw-dump` at runtime. Install `pipewire-utils` on Fedora or `pipewire-bin` on Ubuntu for `pw-dump`.
+Both the release binary and source builds use the [same runtime dependencies](../README.md#requirements).
 
 ```sh
 git clone https://github.com/nobadwordss/gnome-wayland-mcp.git

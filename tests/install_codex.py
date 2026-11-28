@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import tomllib
 
 
 INSTALLER = Path(__file__).resolve().parents[1] / "scripts/install-codex.sh"
@@ -12,6 +13,8 @@ SERVER = "gnome-wayland-mcp"
 
 
 def main():
+    manifest = (INSTALLER.parents[1] / "Cargo.toml").read_text(encoding="utf-8")
+    version = tomllib.loads(manifest)["package"]["version"]
     with tempfile.TemporaryDirectory(prefix="gwm-install-test-") as directory:
         root = Path(directory)
         app = root / "app with spaces"
@@ -37,7 +40,8 @@ def main():
             subprocess.run([*installer, *arguments], env=env, cwd=profile, check=True)
             entry = json.loads(subprocess.check_output(get, env=env, cwd=profile))["transport"]
             binary = Path(entry["command"])
-            assert binary.is_relative_to(profile) and os.access(binary, os.X_OK), binary
+            assert binary == profile / ".local/share" / SERVER / f"v{version}" / SERVER, binary
+            assert subprocess.check_output([binary, "--version"], text=True).strip() == f"{SERVER} {version}"
             assert entry["args"] == expected, entry
             if name == "custom":
                 subprocess.run([*installer, "--"], env=env, cwd=profile, check=True)
