@@ -1,6 +1,6 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
-use anyhow::{Context, Result, anyhow, bail, ensure};
+use anyhow::{Result, anyhow, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rmcp::{
     ServerHandler,
@@ -11,12 +11,15 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::Mutex;
+use tokio::{
+    sync::Mutex,
+    time::{Instant, sleep, timeout_at},
+};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
-    mutter::{CLICK_NOT_SENT, CLICK_UNCERTAIN, Mutter},
+    mutter::Mutter,
     runtime::{Capture, CaptureHealth, Process, Program, Runtime, Size},
 };
 
@@ -89,6 +92,51 @@ struct Click {
     point: Point,
     #[serde(default)]
     button: Button,
+    /// Number of clicks at the same point. Use 1 (default) or 2.
+    #[serde(default = "one_click")]
+    #[schemars(range(min = 1, max = 2))]
+    count: u8,
+}
+
+fn one_click() -> u8 {
+    1
+}
+
+#[derive(Clone, Copy, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct Pixel {
+    x: u32,
+    y: u32,
+}
+
+impl Pixel {
+    fn check(self, size: Size) -> Result<()> {
+        ensure!(
+            self.x < size.width && self.y < size.height,
+            "point is outside the screenshot"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct Drag {
+    /// Opaque ID from the latest screenshot, shared by both endpoints.
+    frame_id: String,
+    /// Pixel where the button is pressed.
+    start: Pixel,
+    /// Pixel where the button is released.
+    end: Pixel,
+    #[serde(default)]
+    button: Button,
+}
+
+#[derive(Clone, Copy)]
+enum ButtonGesture {
+    Click,
+    DoubleClick,
+    Drag(Pixel),
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -158,6 +206,7 @@ enum Action {
     Screenshot,
     Move(Point),
     Click(Click),
+    Drag(Drag),
     Scroll(Scroll),
     Key(Key),
     Paste(Text),
@@ -274,11 +323,19 @@ impl Server {
     }
 
     #[tool(
-        description = "Move to a point in the most recent screenshot and click in the private desktop.",
+        description = "Click a point in the latest screenshot. Set count to 2 to double-click with one frame ID.",
         annotations(open_world_hint = false)
     )]
     async fn mouse_click(&self, Parameters(click): Parameters<Click>) -> CallToolResult {
         self.execute(Action::Click(click)).await
+    }
+
+    #[tool(
+        description = "Drag from start to end in the latest screenshot using one frame ID. The server holds and releases the button.",
+        annotations(open_world_hint = false)
+    )]
+    async fn mouse_drag(&self, Parameters(drag): Parameters<Drag>) -> CallToolResult {
+        self.execute(Action::Drag(drag)).await
     }
 
     #[tool(
@@ -373,36 +430,41 @@ impl State {
             Action::Move(point) => {
                 let desktop = running_desktop(&mut self.desktop)?;
                 desktop.begin_pointer(&point, size).await?;
-                dispatched(desktop.mutter.move_pointer(point.x, point.y).await)
+                dispatched(desktop.move_pointer(point.x, point.y).await)
             }
-            Action::Click(Click { point, button }) => {
-                let desktop = running_desktop(&mut self.desktop)?;
-                desktop
-                    .begin_pointer(&point, size)
+            Action::Click(Click {
+                point,
+                button,
+                count,
+            }) => {
+                let gesture = match count {
+                    1 => ButtonGesture::Click,
+                    2 => ButtonGesture::DoubleClick,
+                    _ => bail!("count must be 1 or 2"),
+                };
+                running_desktop(&mut self.desktop)?
+                    .button_gesture(&point, size, button, gesture, stopping)
                     .await
-                    .context(CLICK_NOT_SENT)?;
-                desktop
-                    .mutter
-                    .move_pointer(point.x, point.y)
+            }
+            Action::Drag(Drag {
+                frame_id,
+                start,
+                end,
+                button,
+            }) => {
+                end.check(size)?;
+                ensure!(
+                    start.x != end.x || start.y != end.y,
+                    "drag endpoints must differ"
+                );
+                let point = Point {
+                    frame_id,
+                    x: start.x,
+                    y: start.y,
+                };
+                running_desktop(&mut self.desktop)?
+                    .button_gesture(&point, size, button, ButtonGesture::Drag(end), stopping)
                     .await
-                    .context(CLICK_NOT_SENT)?;
-                desktop
-                    .capture
-                    .require_uninterrupted(&desktop.runtime)
-                    .await
-                    .context(CLICK_NOT_SENT)?;
-                desktop
-                    .mutter
-                    .click(button.evdev(), desktop.capture.link_interrupted())
-                    .await?;
-                // The fresh query also covers disconnect notices still in transit.
-                let health = desktop
-                    .capture
-                    .health(&desktop.runtime)
-                    .await
-                    .context(CLICK_UNCERTAIN)?;
-                ensure!(health == CaptureHealth::Ready, CLICK_UNCERTAIN);
-                Ok(message(json!({"status":"dispatched"})))
             }
             Action::Scroll(Scroll {
                 point,
@@ -418,7 +480,7 @@ impl State {
                 let desktop = running_desktop(&mut self.desktop)?;
                 desktop.begin_pointer(&point, size).await?;
                 let result = async {
-                    desktop.mutter.move_pointer(point.x, point.y).await?;
+                    desktop.move_pointer(point.x, point.y).await?;
                     desktop
                         .capture
                         .require_uninterrupted(&desktop.runtime)
@@ -590,12 +652,112 @@ impl Desktop {
             self.capture.frame_id.is_some() && frame == self.capture.frame_id,
             "frame_id is stale or unknown; take a new screenshot"
         );
-        ensure!(
-            point.x < size.width && point.y < size.height,
-            "point is outside the screenshot"
-        );
+        Pixel {
+            x: point.x,
+            y: point.y,
+        }
+        .check(size)?;
         self.capture.frame_id = None;
         self.capture.require_uninterrupted(&self.runtime).await
+    }
+
+    async fn move_pointer(&self, x: u32, y: u32) -> Result<()> {
+        self.mutter
+            .move_pointer(x, y, Some(self.capture.link_interrupted()))
+            .await
+    }
+
+    async fn button_gesture(
+        &mut self,
+        point: &Point,
+        size: Size,
+        button: Button,
+        gesture: ButtonGesture,
+        stopping: &CancellationToken,
+    ) -> Result<CallToolResult> {
+        let mut started = false;
+        let result = async {
+            self.begin_pointer(point, size).await?;
+            self.move_pointer(point.x, point.y).await?;
+            self.capture.require_uninterrupted(&self.runtime).await?;
+            let link = self.capture.link_interrupted();
+            let button = button.evdev();
+            // Avoid sending an unrelated second click if the compositor or graph query stalls.
+            let double_click_deadline = Instant::now() + Duration::from_millis(200);
+            self.mutter
+                .with_button_down(button, link.cancelled(), &mut started, async {
+                    if let ButtonGesture::Drag(end) = gesture {
+                        self.drag_path(point, end, stopping).await?;
+                    }
+                    Ok(())
+                })
+                .await?;
+            if matches!(gesture, ButtonGesture::DoubleClick) {
+                sleep(Duration::from_millis(40)).await;
+                ensure!(
+                    !stopping.is_cancelled(),
+                    "private desktop server is shutting down"
+                );
+                self.capture.require_uninterrupted(&self.runtime).await?;
+                ensure!(
+                    Instant::now() < double_click_deadline,
+                    "double-click interval elapsed before second press"
+                );
+                let interrupt = async {
+                    let _ = timeout_at(double_click_deadline, link.cancelled()).await;
+                };
+                self.mutter
+                    .with_button_down(button, interrupt, &mut started, std::future::ready(Ok(())))
+                    .await?;
+            }
+            // Observe any disconnect still in transit before acknowledging the gesture.
+            self.capture.require_uninterrupted(&self.runtime).await
+        }
+        .await;
+        if let Err(error) = result {
+            let (not_sent, uncertain) = match gesture {
+                ButtonGesture::Click => {
+                    ("Click was not sent", "The click may have been delivered.")
+                }
+                ButtonGesture::DoubleClick => (
+                    "Double-click was not sent",
+                    "The double-click may have been partially delivered.",
+                ),
+                ButtonGesture::Drag(_) => (
+                    "Drag was not sent",
+                    "The drag may have been partially delivered.",
+                ),
+            };
+            if started {
+                bail!(
+                    "{uncertain} Do not retry it. Take a new screenshot to check the result.\n{error:#}"
+                );
+            }
+            return Err(error.context(not_sent));
+        }
+        Ok(message(json!({"status":"dispatched"})))
+    }
+
+    async fn drag_path(
+        &self,
+        start: &Point,
+        end: Pixel,
+        stopping: &CancellationToken,
+    ) -> Result<()> {
+        let distance = start.x.abs_diff(end.x).max(start.y.abs_diff(end.y));
+        let steps = distance.min(12);
+        for step in 1..=steps {
+            sleep(Duration::from_millis(12)).await;
+            ensure!(
+                !stopping.is_cancelled(),
+                "private desktop server is shutting down"
+            );
+            self.capture.observed_health()?.require_ready()?;
+            let interpolate = |a: u32, b: u32| (a * (steps - step) + b * step + steps / 2) / steps;
+            self.move_pointer(interpolate(start.x, end.x), interpolate(start.y, end.y))
+                .await?;
+        }
+        Ok(())
     }
 }
 

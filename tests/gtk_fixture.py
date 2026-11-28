@@ -87,6 +87,15 @@ def activate(app):
     window_keys = Gtk.EventControllerKey()
     window_keys.connect("key-pressed", replace_on_key)
     window.add_controller(window_keys)
+    window_motion = Gtk.EventControllerMotion()
+    window_motion.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+
+    def record_motion(controller, x, y):
+        update(pointer=[round(x), round(y)],
+               left_down=bool(controller.get_current_event_state() & Gdk.ModifierType.BUTTON1_MASK))
+
+    window_motion.connect("motion", record_motion)
+    window.add_controller(window_motion)
     # Allow the test to change the screen without consuming its MCP frame ID.
     GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGUSR1, switch_target)
 
@@ -107,6 +116,14 @@ def activate(app):
         update(text=text)
 
     buffer.connect("changed", record_edit)
+
+    def record_selection(buf, *_):
+        bounds = buf.get_selection_bounds()
+        selected = buf.get_text(*bounds, False) if bounds else ""
+        if selected != state.get("selected"):
+            update(selected=selected)
+
+    buffer.connect("mark-set", record_selection)
     defer_paste = False
     pending_text = None
 

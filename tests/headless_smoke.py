@@ -234,7 +234,7 @@ def exercise(client, report):
     tools = client.send("tools/list", {})["tools"]
     assert {tool["name"] for tool in tools} == {
         "desktop_start", "desktop_status", "desktop_stop", "launch_app", "screenshot",
-        "mouse_move", "mouse_click", "mouse_scroll", "press_key", "type_text",
+        "mouse_move", "mouse_click", "mouse_drag", "mouse_scroll", "press_key", "type_text",
     }
     assert client.call("desktop_status")["status"] == "stopped"
     client.call("screenshot", error="start the private desktop")

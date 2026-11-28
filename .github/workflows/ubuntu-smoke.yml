@@ -38,3 +38,6 @@ jobs:
 
       - name: Check click delivery across a capture disconnect
         run: /usr/bin/python3 -B tests/click_disconnect.py target/debug/gnome-wayland-mcp
+
+      - name: Check double-click and drag selection and interrupted gestures
+        run: /usr/bin/python3 -B tests/pointer_gestures.py target/debug/gnome-wayland-mcp

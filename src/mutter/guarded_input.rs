@@ -1,7 +1,6 @@
 use std::{cell::Cell, future::Future, io, os::fd::BorrowedFd, path::Path};
 
 use tokio::net::{UnixStream, unix::OwnedWriteHalf};
-use tokio_util::sync::CancellationToken;
 use zbus::{
     Connection,
     connection::socket::{BoxedSplit, WriteHalf},
@@ -9,11 +8,11 @@ use zbus::{
 
 use super::DBUS_TIMEOUT;
 
-tokio::task_local! { static PRESS_STARTED: Cell<bool>; }
+tokio::task_local! { static WRITE_STARTED: Cell<bool>; }
 
 pub(super) async fn connect(path: &Path) -> zbus::Result<Connection> {
     let (read, write) = UnixStream::connect(path).await?.into_split();
-    let socket = BoxedSplit::new(Box::new(read), Box::new(ButtonWriter(write)));
+    let socket = BoxedSplit::new(Box::new(read), Box::new(InputWriter(write)));
     zbus::connection::Builder::socket(socket)
         .method_timeout(DBUS_TIMEOUT)
         .build()
@@ -21,39 +20,39 @@ pub(super) async fn connect(path: &Path) -> zbus::Result<Connection> {
 }
 
 pub(super) async fn send(
-    interrupted: &CancellationToken,
+    interrupted: impl Future<Output = ()>,
     call: impl Future<Output = zbus::Result<()>>,
 ) -> (bool, zbus::Result<()>) {
-    PRESS_STARTED
+    WRITE_STARTED
         .scope(Cell::new(false), async {
             tokio::pin!(call);
             let reply = tokio::select! {
                 biased;
-                _ = interrupted.cancelled() => {
-                    if !PRESS_STARTED.with(Cell::get) {
-                        return (false, Err(zbus::Error::Failure("capture link interrupted before button press".into())));
+                _ = interrupted => {
+                    if !WRITE_STARTED.with(Cell::get) {
+                        return (false, Err(zbus::Error::Failure("pointer input interrupted before transmission".into())));
                     }
                     // A partial message must be finished on the shared D-Bus socket.
                     call.await
                 }
                 reply = &mut call => reply,
             };
-            (PRESS_STARTED.with(Cell::get), reply)
+            (WRITE_STARTED.with(Cell::get), reply)
         })
         .await
 }
 
 #[derive(Debug)]
-struct ButtonWriter(OwnedWriteHalf);
+struct InputWriter(OwnedWriteHalf);
 
 #[async_trait::async_trait]
-impl WriteHalf for ButtonWriter {
+impl WriteHalf for InputWriter {
     async fn sendmsg(&mut self, bytes: &[u8], fds: &[BorrowedFd<'_>]) -> io::Result<usize> {
         // Entering a zbus call can still leave it waiting for the writer lock or
-        // a writable socket. Only a successful sendmsg commits the press.
+        // a writable socket. Only a successful sendmsg commits the input.
         let count = self.0.sendmsg(bytes, fds).await?;
         if count > 0 {
-            let _ = PRESS_STARTED.try_with(|started| started.set(true));
+            let _ = WRITE_STARTED.try_with(|started| started.set(true));
         }
         Ok(count)
     }
@@ -75,6 +74,7 @@ impl WriteHalf for ButtonWriter {
 mod tests {
     use super::*;
     use tokio::io::AsyncReadExt;
+    use tokio_util::sync::CancellationToken;
 
     #[tokio::test]
     async fn disconnect_while_the_first_socket_write_is_blocked_sends_no_press() -> io::Result<()> {
@@ -89,9 +89,9 @@ mod tests {
                 Err(error) => return Err(error),
             }
         }
-        let mut writer = ButtonWriter(socket.into_split().1);
+        let mut writer = InputWriter(socket.into_split().1);
         let interrupted = CancellationToken::new();
-        let press = send(&interrupted, async {
+        let press = send(interrupted.cancelled(), async {
             writer.sendmsg(b"press", &[]).await?;
             Ok(())
         });
@@ -113,9 +113,9 @@ mod tests {
     #[tokio::test]
     async fn disconnect_after_the_first_write_allows_the_message_to_finish() -> zbus::Result<()> {
         let (socket, mut peer) = UnixStream::pair()?;
-        let mut writer = ButtonWriter(socket.into_split().1);
+        let mut writer = InputWriter(socket.into_split().1);
         let interrupted = CancellationToken::new();
-        let (started, reply) = send(&interrupted, async {
+        let (started, reply) = send(interrupted.cancelled(), async {
             assert_eq!(writer.sendmsg(b"a", &[]).await?, 1);
             interrupted.cancel();
             tokio::task::yield_now().await;

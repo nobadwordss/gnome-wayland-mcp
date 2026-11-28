@@ -277,7 +277,8 @@ The Ubuntu VM used the archive's Chromium sandbox helper with Ubuntu's default A
 | `launch_app` | Starts the app specified in the server's arguments. |
 | `screenshot` | Returns a PNG and its `frame_id`, `width`, and `height`. |
 | `mouse_move` | Moves the pointer to `{frame_id, x, y}`. |
-| `mouse_click` | Clicks `{point: {frame_id, x, y}, button}`. Defaults to `left`. |
+| `mouse_click` | Clicks `{point: {frame_id, x, y}, button}`. The button defaults to `left`. Source builds accept `count: 1` (default) or `count: 2` for a double-click. |
+| `mouse_drag` | In source builds, drags from `start` to `end` in a straight line using one `frame_id`. Both endpoints use screenshot pixels. The optional `button` defaults to `left`. |
 | `mouse_scroll` | Scrolls at `{point: {frame_id, x, y}, vertical, horizontal}`. Positive steps move down or right. |
 | `press_key` | Sends `{key, modifiers}`. Supports lowercase ASCII letters, digits, and named keys such as `Enter` and `Left`. |
 | `type_text` | Pastes up to 16 KiB of UTF-8 from `{text}` into the focused editable field. Defaults to Ctrl+V. |
@@ -288,6 +289,8 @@ The Ubuntu VM used the archive's Chromium sandbox helper with Ubuntu's default A
 Builds from this checkout also report `capture.status`. A running desktop can have a `ready`, `paused`, or `recovery_needed` capture. A stopped desktop reports `stopped`. If a desktop service has failed, capture is `unavailable`. If the server cannot inspect the capture, it reports `unknown` with an error. Checking status neither starts nor replaces a capture.
 
 Screenshot coordinates start at the top-left pixel. Each pointer action uses the current `frame_id`. A new screenshot, app launch, or input invalidates earlier IDs. A `dispatched` response confirms delivery to Mutter. For `type_text`, Mutter also acknowledges a clipboard transfer and can request the text for its own clipboard cache. Use a fresh screenshot to verify that the app inserted the text before pressing Enter or replacing the clipboard with another `type_text` call.
+
+For a word selection, call `mouse_click` with `{"point":{"frame_id":"…","x":320,"y":140},"count":2}`. For a range, call `mouse_drag` with `{"frame_id":"…","start":{"x":320,"y":140},"end":{"x":480,"y":140}}`. Choose two distinct pixels from the same screenshot. A fresh screenshot shows the resulting selection. The [GTK gesture regression](tests/pointer_gestures.py) checks the selected text and button release after a disconnect on Ubuntu and Fedora.
 
 Pass `{"text":"Hello","paste_shortcut":"ctrl_shift_v"}` for apps whose paste shortcut is Ctrl+Shift+V. Omit `paste_shortcut`, pass `null`, or pass `"ctrl_v"` to use Ctrl+V.
 
@@ -301,7 +304,7 @@ Each MCP server process keeps at most one private desktop. Repeated `desktop_sta
 
 In builds from this checkout, `screenshot` and `desktop_start` can replace a disconnected capture on the same Mutter stream. The first recovered screenshot uses a complete PNG from the new capture. The desktop and app keep running. A paused capture can recover after it resumes. `launch_app` uses the running desktop even while capture needs recovery. If the capture reader has closed, take a new screenshot before sending keys or pasting.
 
-In these builds, the server also checks the original capture link's serial and active state before issuing a `frame_id` or sending pointer input. It watches that link with `pw-dump --monitor`. If MCP detects a disconnect before it starts writing a button press to D-Bus, it rejects the click. If it detects the loss after transmission starts and before the tool replies, it finishes the button release and reports that the click may have been delivered. It sends no second click. Check the result with a fresh screenshot.
+In these builds, the server checks the original capture link's serial and active state before issuing a `frame_id` or pressing a button. It watches that link with `pw-dump --monitor`. If it detects capture loss before the first press starts, it rejects the gesture. If it detects loss after a press may have reached Mutter, it stops the remaining gesture, attempts the matching release and reports possible delivery. A double-click also has a 200 ms budget for starting its second press. If a gesture reports possible delivery, inspect a fresh screenshot before taking further action.
 
 Use `desktop_stop` to release the desktop while the MCP client is open, then check for `stopped` with `desktop_status`. The server stops its app and desktop services and removes the temporary runtime directory. Cleanup also runs on stdio EOF, `SIGINT`, or `SIGTERM`. A separate worker owns the desktop and runs cleanup if the client terminates the MCP launcher abruptly. Shutdown interrupts desktop startup and waits for any services already launched to exit before removing the runtime directory. A forced kill of the worker itself can leave processes and runtime files behind. App descendants that leave the managed process group can outlive the session.
 

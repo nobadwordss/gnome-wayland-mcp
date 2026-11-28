@@ -465,6 +465,14 @@ impl Capture {
         if self.is_closed()? || !self.link.is_active(&runtime.env).await? {
             return Ok(CaptureHealth::RecoveryNeeded);
         }
+        self.observed_health()
+    }
+
+    /// Check the monitor and reader between drag steps without spawning a graph query.
+    pub fn observed_health(&self) -> Result<CaptureHealth> {
+        if self.link.interrupted.is_cancelled() || self.is_closed()? {
+            return Ok(CaptureHealth::RecoveryNeeded);
+        }
         // Leave stop/continue events waitable so an interruption remains
         // visible until this capture is replaced, even if it already resumed.
         let event = waitid(
