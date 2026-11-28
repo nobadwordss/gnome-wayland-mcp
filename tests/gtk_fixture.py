@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import signal
 import sys
 
 import gi
@@ -44,6 +45,7 @@ def activate(app):
     styles = Gtk.CssProvider()
     styles.load_from_string(
         ".stage { background-color: #26405a; }"
+        ".stage.replaced { background-color: #612d45; }"
         ".screen-code { color: white; font-size: 22px; }"
         '.routing-editor { font-family: "Noto Sans CJK KR", sans-serif; }'
     )
@@ -63,18 +65,39 @@ def activate(app):
     replacement.set_size_request(180, 70)
     replacement.connect("clicked", lambda _: update(replacement_clicks=state.get("replacement_clicks", 0) + 1))
 
-    def replace_target(_controller, keyval, _keycode, _modifiers):
+    def switch_target():
+        replaced = not state.get("target_replaced", False)
+        if replaced:
+            stage.add_css_class("replaced")
+            stage.remove(button)
+            stage.put(replacement, 100, 100)
+        else:
+            stage.remove_css_class("replaced")
+            stage.remove(replacement)
+            stage.put(button, 100, 100)
+        update(target_replaced=replaced)
+        return GLib.SOURCE_CONTINUE
+
+    def replace_on_key(_controller, keyval, _keycode, _modifiers):
         if keyval != Gdk.KEY_F7:
             return False
-        styles.load_from_string(".stage { background-color: #612d45; }")
-        stage.remove(button)
-        stage.put(replacement, 100, 100)
-        update(target_replaced=True)
+        switch_target()
         return True
 
     window_keys = Gtk.EventControllerKey()
-    window_keys.connect("key-pressed", replace_target)
+    window_keys.connect("key-pressed", replace_on_key)
     window.add_controller(window_keys)
+    window_motion = Gtk.EventControllerMotion()
+    window_motion.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+
+    def record_motion(controller, x, y):
+        update(pointer=[round(x), round(y)],
+               left_down=bool(controller.get_current_event_state() & Gdk.ModifierType.BUTTON1_MASK))
+
+    window_motion.connect("motion", record_motion)
+    window.add_controller(window_motion)
+    # Allow the test to change the screen without consuming its MCP frame ID.
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGUSR1, switch_target)
 
     editor = Gtk.TextView()
     editor.set_size_request(400, 100)
@@ -93,6 +116,14 @@ def activate(app):
         update(text=text)
 
     buffer.connect("changed", record_edit)
+
+    def record_selection(buf, *_):
+        bounds = buf.get_selection_bounds()
+        selected = buf.get_text(*bounds, False) if bounds else ""
+        if selected != state.get("selected"):
+            update(selected=selected)
+
+    buffer.connect("mark-set", record_selection)
     defer_paste = False
     pending_text = None
 

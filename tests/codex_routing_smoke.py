@@ -32,7 +32,7 @@ GUI_PROMPT = (
 FILE_PROMPT = "이 폴더의 sample.txt를 읽고 두 번째 줄만 그대로 알려줘."
 STAGE_COLOR = (38, 64, 90)
 EDITOR = (455, 112, 845, 205)
-INPUT_TOOLS = {"mouse_click", "mouse_move", "mouse_scroll", "press_key", "type_text"}
+INPUT_TOOLS = {"mouse_click", "mouse_drag", "mouse_move", "mouse_scroll", "press_key", "type_text"}
 
 
 def run_codex(args, directory, prompt, on_event):

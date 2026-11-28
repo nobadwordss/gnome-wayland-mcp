@@ -1,6 +1,7 @@
 """Exercise the real MCP transport, a private Mutter desktop and a GTK client."""
 
 import base64
+from contextlib import contextmanager
 import io
 import json
 import os
@@ -54,6 +55,9 @@ class Client:
         self.write(method, params, notification)
         if notification:
             return None
+        return self.receive(method)
+
+    def receive(self, method):
         deadline = time.monotonic() + 40
         while time.monotonic() < deadline:
             try:
@@ -129,6 +133,12 @@ def initialize(client):
     client.send("notifications/initialized", notification=True)
 
 
+def assert_running_app(client, capture):
+    status = client.call("desktop_status")
+    assert status["status"] == "application_running" and status["application"] == {"status": "running"}, status
+    assert status["capture"] == {"status": capture}, status
+
+
 def exercise_application_status(binary, root, log):
     unconfigured = Client(binary, [], log)
     try:
@@ -136,6 +146,11 @@ def exercise_application_status(binary, root, log):
         status = unconfigured.call("desktop_status")
         assert status["status"] == "stopped" and not status["application_configured"]
         assert status["application"] == {"status": "not_configured"}
+        assert status["capture"] == {"status": "stopped"}
+        assert unconfigured.call("desktop_start")["status"] == "desktop_running"
+        assert unconfigured.call("screenshot")["frame_id"]
+        unconfigured.call("launch_app", error="configure an application")
+        assert unconfigured.call("desktop_stop")["status"] == "stopped"
     finally:
         unconfigured.close()
 
@@ -161,9 +176,11 @@ sys.exit(int(reason))
         not_started = {"status": "not_started"}
         initial = client.call("desktop_status")
         assert initial["status"] == "stopped" and initial["application"] == not_started
+        assert initial["capture"] == {"status": "stopped"}
         desktop = client.call("desktop_start")
-        assert desktop["status"] == "desktop_running" and "application" not in desktop
-        assert client.call("desktop_status") == {**desktop, "application": not_started}
+        assert desktop["status"] == "desktop_running" and "application" not in desktop and "capture" not in desktop
+        ready = {"status": "ready"}
+        assert client.call("desktop_status") == {**desktop, "application": not_started, "capture": ready}
 
         for reason, termination in (
             ("23", {"exit_code": 23}),
@@ -173,7 +190,7 @@ sys.exit(int(reason))
             request.unlink(missing_ok=True)
             running = {**desktop, "status": "application_running"}
             assert client.call("launch_app") == running
-            assert client.call("desktop_status") == {**running, "application": {"status": "running"}}
+            assert_running_app(client, "ready")
 
             pending = request.with_suffix(".tmp")
             pending.write_text(reason, encoding="utf-8")
@@ -181,10 +198,31 @@ sys.exit(int(reason))
             exited = poll(lambda: client.call("desktop_status"),
                           lambda state: state["application"]["status"] == "exited",
                           f"application termination ({reason})")
-            assert exited == {**desktop, "application": {"status": "exited", **termination}}, exited
+            assert exited == {**desktop, "application": {"status": "exited", **termination}, "capture": ready}, exited
             assert client.call("desktop_status") == exited
 
+        (worker,) = children(client.process.pid)
+        capture = child_executable(worker, "gst-launch-1.0")
+        os.kill(capture, signal.SIGKILL)
+        down = poll(lambda: client.call("desktop_status"), lambda s: s["capture"]["status"] == "recovery_needed",
+                    "capture process exit")
+        assert down == {**exited, "capture": {"status": "recovery_needed"}}, down
+        request.unlink()
+        assert client.call("launch_app") == running
+        assert_running_app(client, "recovery_needed")
+        client.call("press_key", {"key": "a"}, error="private capture stream closed")
+        client.call("type_text", {"text": "test"}, error="private capture stream closed")
         assert client.call("screenshot")["frame_id"]
+        assert_running_app(client, "ready")
+
+        with stopped_process(child_executable(worker, "pipewire")):
+            status = client.call("desktop_status")
+            assert status["status"] == "application_running" and status["application"] == {"status": "running"}
+            assert status["capture"]["status"] == "unknown" and status["capture"]["error"], status
+
+        os.kill(child_executable(worker, "wireplumber"), signal.SIGTERM)
+        failed = poll(lambda: client.call("desktop_status"), lambda s: s["status"] == "failed", "desktop service exit")
+        assert failed["capture"] == {"status": "unavailable"} and failed["application"] == {"status": "running"}
         assert client.call("desktop_stop") == {**desktop, "status": "stopped"}
         assert client.call("desktop_status") == initial
     finally:
@@ -196,7 +234,7 @@ def exercise(client, report):
     tools = client.send("tools/list", {})["tools"]
     assert {tool["name"] for tool in tools} == {
         "desktop_start", "desktop_status", "desktop_stop", "launch_app", "screenshot",
-        "mouse_move", "mouse_click", "mouse_scroll", "press_key", "type_text",
+        "mouse_move", "mouse_click", "mouse_drag", "mouse_scroll", "press_key", "type_text",
     }
     assert client.call("desktop_status")["status"] == "stopped"
     client.call("screenshot", error="start the private desktop")
@@ -272,7 +310,7 @@ def exercise(client, report):
     client.call("press_key", {"key": "Backspace"})
     poll(lambda: snapshot(report), lambda state: state.get("text") == "", "GTK received Ctrl+A and Backspace")
 
-    exercise_capture_interruption(client, report, runtime)
+    exercise_capture_interruption(client, report)
     frame = client.call("screenshot")
     assert client.call("desktop_stop")["status"] == "stopped"
     assert not runtime.exists() and not Path(f"/proc/{app['pid']}").exists()
@@ -283,6 +321,7 @@ def exercise(client, report):
     client.call("launch_app")
     second = poll(lambda: snapshot(report), lambda state: state.get("ready"), "second GTK window mapped")
     assert second["runtime"] != str(runtime)
+    exercise_capture_link_loss(client, report, second)
     client.process.send_signal(signal.SIGTERM)
     client.process.wait(timeout=10)
     assert client.process.returncode == 0
@@ -302,7 +341,125 @@ def runtime_processes(runtime):
     return live
 
 
-def exercise_capture_interruption(client, report, runtime):
+def disconnect_capture_link(runtime):
+    remote = runtime / "pipewire-0"
+    assert runtime.parent == Path("/tmp") and runtime.name.startswith("gwm-") and remote.is_socket()
+    objects = json.loads(subprocess.check_output(["/usr/bin/pw-dump", "-r", remote], timeout=5))
+    nodes = {obj["id"]: obj["info"]["props"].get("node.name") for obj in objects
+             if obj["type"] == "PipeWire:Interface:Node"}
+    (link,) = [obj for obj in objects if obj["type"] == "PipeWire:Interface:Link"
+               and nodes[obj["info"]["output-node-id"]] == "mutter"
+               and nodes[obj["info"]["input-node-id"]] == "gst-launch-1.0"]
+    subprocess.run(["/usr/bin/pw-link", "-r", remote, "-d", str(link["id"])], check=True, timeout=5)
+
+
+@contextmanager
+def stopped_process(pid):
+    handle = os.pidfd_open(pid)
+    try:
+        signal.pidfd_send_signal(handle, signal.SIGSTOP)
+
+        def process_state():
+            return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+
+        poll(process_state, lambda state: state == "T", "private process stopped")
+        yield
+    finally:
+        try:
+            signal.pidfd_send_signal(handle, signal.SIGCONT)
+        except ProcessLookupError:
+            pass  # Capture recovery already reaped this process.
+        os.close(handle)
+
+
+def click_after_unlink(client, runtime, app_pid, frame):
+    handle = os.pidfd_open(app_pid)
+    try:
+        disconnect_capture_link(runtime)
+        # Issue the old click before waiting for GTK, a new PNG or gst-launch's exit.
+        signal.pidfd_send_signal(handle, signal.SIGUSR1)
+        result = client.send("tools/call", {"name": "mouse_click", "arguments": {"point": point(frame, 170, 135)}})
+    finally:
+        os.close(handle)
+    # Require rejection before any pointer movement or partial dispatch.
+    error = result["content"][0]["text"]
+    assert result.get("isError") and error == "Click was not sent: private capture was interrupted; take a new screenshot", error
+
+
+def exercise_capture_link_loss(client, report, app):
+    runtime = Path(app["runtime"])
+    frame = poll(lambda: client.call("screenshot"), lambda f: f["pixel"] == (38, 64, 90), "original GTK screen")
+    client.call("mouse_click", {"point": point(frame, 490, 138)})
+    text = "preserve this entry"
+    client.call("type_text", {"text": text})
+    poll(lambda: snapshot(report), lambda s: s["text"] == text, "text before capture disconnect")
+    frame = client.call("screenshot")
+    assert frame["pixel"] == (38, 64, 90)
+    (worker,) = children(client.process.pid)
+    before = set(children(worker))
+    assert app["pid"] in before
+    capture = child_executable(worker, "gst-launch-1.0")
+    monitor = child_executable(worker, "pw-dump")
+    click_after_unlink(client, runtime, app["pid"], frame)
+    poll(lambda: snapshot(report), lambda s: s.get("target_replaced"), "target changed with the link down")
+    assert_running_app(client, "recovery_needed")
+
+    recovered = client.call("screenshot")
+    assert_running_app(client, "ready")
+    assert recovered["frame_id"] != frame["frame_id"] and recovered["pixel"] == (97, 45, 69), recovered
+    after = set(children(worker))
+    assert before - after == {capture, monitor}
+    new_processes = {Path(f"/proc/{pid}/exe").readlink().name: pid for pid in after - before}
+    assert set(new_processes) == {"gst-launch-1.0", "pw-dump"} and len(after) == len(before)
+    replacement = new_processes["gst-launch-1.0"]
+    client.call("mouse_click", {"point": point(frame, 170, 135)}, error="stale or unknown")
+    assert snapshot(report).get("replacement_clicks", 0) == 0
+    client.call("mouse_click", {"point": point(recovered, 170, 135)})
+    state = poll(lambda: snapshot(report), lambda s: s.get("replacement_clicks") == 1, "click after capture recovery")
+    assert state["pid"] == app["pid"] and state["text"] == text and state["clicks"] == 0
+
+    # Keep the old reader alive with stdout open throughout the graph check.
+    frame = client.call("screenshot")
+    with stopped_process(replacement):
+        click_after_unlink(client, runtime, app["pid"], frame)
+        poll(lambda: snapshot(report), lambda s: s.get("target_replaced") is False, "original button restored")
+        assert_running_app(client, "recovery_needed")
+        recovered = client.call("screenshot")
+    assert frame["pixel"] == (97, 45, 69) and recovered["pixel"] == (38, 64, 90)
+    assert recovered["frame_id"] != frame["frame_id"] and not Path(f"/proc/{replacement}").exists()
+    state = snapshot(report)
+    assert state["pid"] == app["pid"] and state["text"] == text
+    assert state["clicks"] == 0 and state["replacement_clicks"] == 1
+
+    # A repeated desktop_start must also repair capture and invalidate an unused frame ID.
+    frame = recovered
+    disconnect_capture_link(runtime)
+    assert client.call("desktop_start")["status"] == "application_running"
+    assert_running_app(client, "ready")
+    client.call("mouse_click", {"point": point(frame, 170, 135)}, error="stale or unknown")
+    recovered = client.call("screenshot")
+    assert recovered["pixel"] == (38, 64, 90) and recovered["frame_id"] != frame["frame_id"]
+    client.call("mouse_click", {"point": point(recovered, 170, 135)})
+    state = poll(lambda: snapshot(report), lambda s: s["clicks"] == 1, "click after desktop_start")
+    assert state["pid"] == app["pid"] and state["text"] == text
+
+    # Lose only the monitor while the original link and GStreamer are healthy.
+    frame = client.call("screenshot")
+    (monitor,) = [pid for pid in children(worker)
+                  if b"--monitor" in Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")]
+    handle = os.pidfd_open(monitor)
+    try:
+        signal.pidfd_send_signal(handle, signal.SIGTERM)
+        poll(lambda: monitor in children(worker), lambda alive: not alive, "capture link monitor exited")
+    finally:
+        os.close(handle)
+    client.call("mouse_click", {"point": point(frame, 170, 135)}, error="Click was not sent")
+    recovered = client.call("screenshot")
+    assert recovered["pixel"] == frame["pixel"] and recovered["frame_id"] != frame["frame_id"]
+    assert snapshot(report)["clicks"] == 1 and snapshot(report)["pid"] == app["pid"]
+
+
+def exercise_capture_interruption(client, report):
     original = client.call("screenshot")
     still = client.call("screenshot")
     assert original["pixel"] == still["pixel"] == (38, 64, 90)
@@ -310,24 +467,12 @@ def exercise_capture_interruption(client, report, runtime):
     client.call("mouse_click", {"point": point(still, 170, 135)})
     poll(lambda: snapshot(report), lambda state: state["clicks"] == 2, "click on a static screen")
 
-    def pause_capture():
-        (pid,) = [pid for pid in runtime_processes(runtime)
-                  if Path(f"/proc/{pid}/exe").readlink() == Path("/usr/bin/gst-launch-1.0")]
-        handle = os.pidfd_open(pid)
-        try:
-            signal.pidfd_send_signal(handle, signal.SIGSTOP)
-            def state():
-                return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
-            poll(state, lambda value: value == "T", "private capture stopped")
-        except BaseException:
-            signal.pidfd_send_signal(handle, signal.SIGCONT)
-            os.close(handle)
-            raise
-        return handle
-
+    (worker,) = children(client.process.pid)
     frame = client.call("screenshot")
-    handle = pause_capture()
-    try:
+    with stopped_process(child_executable(worker, "gst-launch-1.0")):
+        assert_running_app(client, "paused")
+        assert client.call("desktop_start")["status"] == "application_running"
+        assert_running_app(client, "paused")
         client.call("mouse_click", {"point": point(frame, 170, 135)}, error="private capture is paused")
         client.call("press_key", {"key": "F7"})
         poll(lambda: snapshot(report), lambda state: state.get("target_replaced"), "GTK replaced the click target")
@@ -338,10 +483,8 @@ def exercise_capture_interruption(client, report, runtime):
         assert "frame_id" not in error["text"]
         effects = snapshot(report)
         assert effects["clicks"] == 2 and effects.get("replacement_clicks", 0) == 0
-    finally:
-        signal.pidfd_send_signal(handle, signal.SIGCONT)
-        os.close(handle)
 
+    assert_running_app(client, "recovery_needed")
     recovered = client.call("screenshot")
     assert recovered["pixel"] == (97, 45, 69)
     client.call("mouse_click", {"point": point(frame, 170, 135)}, error="stale or unknown")
@@ -352,11 +495,8 @@ def exercise_capture_interruption(client, report, runtime):
     # Detect stop/continue even when no tool was called while it was stopped,
     # and obtain a fresh frame without changing the static app.
     frame = client.call("screenshot")
-    handle = pause_capture()
-    try:
-        signal.pidfd_send_signal(handle, signal.SIGCONT)
-    finally:
-        os.close(handle)
+    with stopped_process(child_executable(worker, "gst-launch-1.0")):
+        pass  # Resume without an intervening MCP call.
     client.call("mouse_click", {"point": point(frame, 170, 135)}, error="private capture was interrupted")
     recovered = client.call("screenshot")
     assert recovered["pixel"] == (97, 45, 69)
@@ -367,6 +507,11 @@ def exercise_capture_interruption(client, report, runtime):
 
 def children(pid):
     return [int(pid) for pid in Path(f"/proc/{pid}/task/{pid}/children").read_text().split()]
+
+
+def child_executable(parent, name):
+    (pid,) = [pid for pid in children(parent) if Path(f"/proc/{pid}/exe").resolve() == Path("/usr/bin", name)]
+    return pid
 
 
 def stall_private_mutter(worker_pid):
@@ -491,7 +636,9 @@ def main():
                     raise
                 finally:
                     client.close()
-    print("Passed: MCP, application status and termination, private sockets, PNG, pointer, click, scroll, keys, paste shortcuts and async insertion, stale frame, interrupted capture and recovery, stop/restart, SIGTERM, launcher loss, interrupted startup, worker exit")
+    print("Passed: MCP, desktop/app/capture status, app termination, private sockets, PNG, pointer, click, scroll, "
+          "keys, paste shortcuts and async insertion, stale frame, first PNG and same app after capture recovery, "
+          "stop/restart, SIGTERM, launcher loss, interrupted startup, worker exit")
 
 
 if __name__ == "__main__":

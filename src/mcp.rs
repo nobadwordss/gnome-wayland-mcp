@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::{Result, anyhow, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -11,13 +11,16 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::Mutex;
+use tokio::{
+    sync::Mutex,
+    time::{Instant, sleep, timeout_at},
+};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
     mutter::Mutter,
-    runtime::{Capture, Process, Program, Runtime, Size},
+    runtime::{Capture, CaptureHealth, Process, Program, Runtime, Size},
 };
 
 #[derive(Clone)]
@@ -37,7 +40,6 @@ struct Desktop {
     capture: Capture,
     mutter: Mutter,
     runtime: Runtime,
-    frame: Option<Uuid>,
 }
 
 #[derive(Serialize)]
@@ -90,6 +92,51 @@ struct Click {
     point: Point,
     #[serde(default)]
     button: Button,
+    /// Number of clicks at the same point. Use 1 (default) or 2.
+    #[serde(default = "one_click")]
+    #[schemars(range(min = 1, max = 2))]
+    count: u8,
+}
+
+fn one_click() -> u8 {
+    1
+}
+
+#[derive(Clone, Copy, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct Pixel {
+    x: u32,
+    y: u32,
+}
+
+impl Pixel {
+    fn check(self, size: Size) -> Result<()> {
+        ensure!(
+            self.x < size.width && self.y < size.height,
+            "point is outside the screenshot"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct Drag {
+    /// Opaque ID from the latest screenshot, shared by both endpoints.
+    frame_id: String,
+    /// Pixel where the button is pressed.
+    start: Pixel,
+    /// Pixel where the button is released.
+    end: Pixel,
+    #[serde(default)]
+    button: Button,
+}
+
+#[derive(Clone, Copy)]
+enum ButtonGesture {
+    Click,
+    DoubleClick,
+    Drag(Pixel),
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -159,6 +206,7 @@ enum Action {
     Screenshot,
     Move(Point),
     Click(Click),
+    Drag(Drag),
     Scroll(Scroll),
     Key(Key),
     Paste(Text),
@@ -239,7 +287,7 @@ impl Server {
     }
 
     #[tool(
-        description = "Report the private desktop and application status, including the app's exit code or signal after termination.",
+        description = "Report the private desktop, application and capture status, including the app's exit code or signal after termination.",
         annotations(open_world_hint = false, read_only_hint = true)
     )]
     async fn desktop_status(&self) -> CallToolResult {
@@ -275,11 +323,19 @@ impl Server {
     }
 
     #[tool(
-        description = "Move to a point in the most recent screenshot and click in the private desktop.",
+        description = "Click a point in the latest screenshot. Set count to 2 to double-click with one frame ID.",
         annotations(open_world_hint = false)
     )]
     async fn mouse_click(&self, Parameters(click): Parameters<Click>) -> CallToolResult {
         self.execute(Action::Click(click)).await
+    }
+
+    #[tool(
+        description = "Drag from start to end in the latest screenshot using one frame ID. The server holds and releases the button.",
+        annotations(open_world_hint = false)
+    )]
+    async fn mouse_drag(&self, Parameters(drag): Parameters<Drag>) -> CallToolResult {
+        self.execute(Action::Drag(drag)).await
     }
 
     #[tool(
@@ -325,67 +381,90 @@ impl State {
         let size = self.size;
         match action {
             Action::Start => {
-                if let Some(desktop) = &mut self.desktop {
-                    if desktop.check().is_ok() {
-                        return Ok(message(self.status(false)?));
-                    }
+                if let Some(desktop) = self.desktop.as_mut().filter(|d| d.runtime.check().is_ok()) {
+                    desktop.recover_capture(size, stopping).await?;
+                } else {
                     self.stop().await;
+                    self.desktop = Some(Desktop::start(size, stopping).await?);
                 }
-                self.desktop = Some(Desktop::start(size, stopping).await?);
-                Ok(message(self.status(false)?))
+                Ok(message(self.status(false).await?))
             }
             Action::Stop => {
                 self.stop().await;
-                Ok(message(self.status(false)?))
+                Ok(message(self.status(false).await?))
             }
-            Action::Status => Ok(message(self.status(true)?)),
+            Action::Status => Ok(message(self.status(true).await?)),
             Action::Launch => {
                 let program = self.program.as_ref().ok_or_else(|| {
                     anyhow!("configure an application in the server arguments after --")
                 })?;
-                let desktop = ready(&mut self.desktop)?;
+                let desktop = running_desktop(&mut self.desktop)?;
                 if !desktop.app_running()? {
-                    desktop.frame = None;
+                    desktop.capture.frame_id = None;
                     desktop.application = Some(desktop.runtime.launch(program)?);
                 }
-                Ok(message(self.status(false)?))
+                Ok(message(self.status(false).await?))
             }
             Action::Screenshot => {
-                let desktop = ready(&mut self.desktop)?;
-                desktop.frame = None;
-                if desktop.capture.was_interrupted()? {
-                    // Open a new reader rather than trusting any PNG still
-                    // buffered in the interrupted pipeline.
-                    let capture = desktop
-                        .runtime
-                        .start_capture(desktop.mutter.node, size, stopping)
-                        .await?;
-                    let mut old = std::mem::replace(&mut desktop.capture, capture);
-                    old.stop().await;
-                }
-                let png = desktop.capture.screenshot().await?;
+                let desktop = running_desktop(&mut self.desktop)?;
+                desktop.capture.frame_id = None;
+                desktop.capture.wait_for_frame().await;
+                desktop
+                    .recover_capture(size, stopping)
+                    .await?
+                    .require_ready()?;
+                let png = desktop.capture.latest_frame()?;
+                let image = ContentBlock::image(STANDARD.encode(png), "image/png");
+                desktop
+                    .capture
+                    .require_uninterrupted(&desktop.runtime)
+                    .await?;
                 let frame_id = Uuid::new_v4();
-                desktop.frame = Some(frame_id);
+                desktop.capture.frame_id = Some(frame_id);
                 let metadata = json!({"frame_id":frame_id.to_string(), "width":size.width, "height":size.height});
                 Ok(CallToolResult::success(vec![
                     ContentBlock::text(metadata.to_string()),
-                    ContentBlock::image(STANDARD.encode(png), "image/png"),
+                    image,
                 ]))
             }
             Action::Move(point) => {
-                let desktop = ready(&mut self.desktop)?;
-                desktop.begin_pointer(&point, size)?;
-                dispatched(desktop.mutter.move_pointer(point.x, point.y).await)
+                let desktop = running_desktop(&mut self.desktop)?;
+                desktop.begin_pointer(&point, size).await?;
+                dispatched(desktop.move_pointer(point.x, point.y).await)
             }
-            Action::Click(Click { point, button }) => {
-                let desktop = ready(&mut self.desktop)?;
-                desktop.begin_pointer(&point, size)?;
-                let result = async {
-                    desktop.mutter.move_pointer(point.x, point.y).await?;
-                    desktop.mutter.click(button.evdev()).await
-                }
-                .await;
-                dispatched(result)
+            Action::Click(Click {
+                point,
+                button,
+                count,
+            }) => {
+                let gesture = match count {
+                    1 => ButtonGesture::Click,
+                    2 => ButtonGesture::DoubleClick,
+                    _ => bail!("count must be 1 or 2"),
+                };
+                running_desktop(&mut self.desktop)?
+                    .button_gesture(&point, size, button, gesture, stopping)
+                    .await
+            }
+            Action::Drag(Drag {
+                frame_id,
+                start,
+                end,
+                button,
+            }) => {
+                end.check(size)?;
+                ensure!(
+                    start.x != end.x || start.y != end.y,
+                    "drag endpoints must differ"
+                );
+                let point = Point {
+                    frame_id,
+                    x: start.x,
+                    y: start.y,
+                };
+                running_desktop(&mut self.desktop)?
+                    .button_gesture(&point, size, button, ButtonGesture::Drag(end), stopping)
+                    .await
             }
             Action::Scroll(Scroll {
                 point,
@@ -398,10 +477,14 @@ impl State {
                         && (horizontal != 0 || vertical != 0),
                     "scroll requires a nonzero step count from -20 to 20"
                 );
-                let desktop = ready(&mut self.desktop)?;
-                desktop.begin_pointer(&point, size)?;
+                let desktop = running_desktop(&mut self.desktop)?;
+                desktop.begin_pointer(&point, size).await?;
                 let result = async {
-                    desktop.mutter.move_pointer(point.x, point.y).await?;
+                    desktop.move_pointer(point.x, point.y).await?;
+                    desktop
+                        .capture
+                        .require_uninterrupted(&desktop.runtime)
+                        .await?;
                     desktop.mutter.scroll(horizontal, vertical).await
                 }
                 .await;
@@ -409,8 +492,8 @@ impl State {
             }
             Action::Key(key) => {
                 let (keysym, modifiers) = key.validate()?;
-                let desktop = ready(&mut self.desktop)?;
-                desktop.frame = None;
+                let desktop = running_desktop(&mut self.desktop)?;
+                desktop.begin_keyboard_input()?;
                 dispatched(desktop.mutter.key(keysym, &modifiers).await)
             }
             Action::Paste(Text {
@@ -421,8 +504,8 @@ impl State {
                     (1..=16_384).contains(&text.len()) && !text.contains('\0'),
                     "text must be 1 to 16,384 UTF-8 bytes without NUL characters"
                 );
-                let desktop = ready(&mut self.desktop)?;
-                desktop.frame = None;
+                let desktop = running_desktop(&mut self.desktop)?;
+                desktop.begin_keyboard_input()?;
                 let modifiers: &[u32] = match paste_shortcut.unwrap_or_default() {
                     PasteShortcut::CtrlV => &[Modifier::Ctrl.evdev()],
                     PasteShortcut::CtrlShiftV => &[Modifier::Ctrl.evdev(), Modifier::Shift.evdev()],
@@ -432,22 +515,26 @@ impl State {
         }
     }
 
-    fn status(&self, include_application: bool) -> Result<Value> {
-        let mut state = match &self.desktop {
-            Some(desktop) if desktop.check().is_err() => "failed",
+    async fn status(&self, detailed: bool) -> Result<Value> {
+        let application = self.application_status()?;
+        let state = match &self.desktop {
+            Some(desktop) if desktop.runtime.check().is_err() => "failed",
+            Some(_) if matches!(application, ApplicationStatus::Running) => "application_running",
             Some(_) => "desktop_running",
             None => "stopped",
         };
-        let application = (include_application || state == "desktop_running")
-            .then(|| self.application_status())
-            .transpose()?;
-        if state == "desktop_running" && matches!(application, Some(ApplicationStatus::Running)) {
-            state = "application_running";
-        }
         let mut status = json!({ "status": state, "mode": "headless", "application_configured": self.program.is_some(),
             "width": self.size.width, "height": self.size.height });
-        if include_application {
+        if detailed {
             status["application"] = json!(application);
+            status["capture"] = match &self.desktop {
+                None => json!({"status": "stopped"}),
+                Some(_) if state == "failed" => json!({"status": "unavailable"}),
+                Some(desktop) => match desktop.capture.health(&desktop.runtime).await {
+                    Ok(health) => json!({"status": health}),
+                    Err(error) => json!({"status": "unknown", "error": format!("{error:#}")}),
+                },
+            };
         }
         Ok(status)
     }
@@ -491,7 +578,7 @@ impl Desktop {
         let startup = async {
             let mutter = stopping
                 .run_until_cancelled(Mutter::connect(
-                    runtime.bus_address(),
+                    &runtime.bus_path(),
                     runtime.mutter_pid(),
                     size,
                 ))
@@ -516,7 +603,6 @@ impl Desktop {
                 capture,
                 mutter,
                 runtime,
-                frame: None,
             }),
             Err(error) => {
                 runtime.stop().await;
@@ -525,9 +611,23 @@ impl Desktop {
         }
     }
 
-    fn check(&self) -> Result<()> {
-        self.runtime.check()?;
-        self.capture.check()
+    async fn recover_capture(
+        &mut self,
+        size: Size,
+        stopping: &CancellationToken,
+    ) -> Result<CaptureHealth> {
+        let health = self.capture.health(&self.runtime).await?;
+        if health != CaptureHealth::RecoveryNeeded {
+            return Ok(health);
+        }
+        // A disconnected reader can still hold PipeWire buffers until it is reaped.
+        self.capture.frame_id = None;
+        self.capture.stop().await;
+        self.capture = self
+            .runtime
+            .start_capture(self.mutter.node, size, stopping)
+            .await?;
+        Ok(CaptureHealth::Ready)
     }
 
     fn app_running(&self) -> Result<bool> {
@@ -537,26 +637,135 @@ impl Desktop {
         }
     }
 
-    fn begin_pointer(&mut self, point: &Point, size: Size) -> Result<()> {
+    fn begin_keyboard_input(&mut self) -> Result<()> {
+        ensure!(
+            !self.capture.is_closed()?,
+            "private capture stream closed; take a new screenshot"
+        );
+        self.capture.frame_id = None;
+        Ok(())
+    }
+
+    async fn begin_pointer(&mut self, point: &Point, size: Size) -> Result<()> {
         let frame = Uuid::parse_str(&point.frame_id).ok();
         ensure!(
-            self.frame.is_some() && frame == self.frame,
+            self.capture.frame_id.is_some() && frame == self.capture.frame_id,
             "frame_id is stale or unknown; take a new screenshot"
         );
-        ensure!(
-            point.x < size.width && point.y < size.height,
-            "point is outside the screenshot"
-        );
-        self.frame = None;
-        self.capture.require_uninterrupted()
+        Pixel {
+            x: point.x,
+            y: point.y,
+        }
+        .check(size)?;
+        self.capture.frame_id = None;
+        self.capture.require_uninterrupted(&self.runtime).await
+    }
+
+    async fn move_pointer(&self, x: u32, y: u32) -> Result<()> {
+        self.mutter
+            .move_pointer(x, y, Some(self.capture.link_interrupted()))
+            .await
+    }
+
+    async fn button_gesture(
+        &mut self,
+        point: &Point,
+        size: Size,
+        button: Button,
+        gesture: ButtonGesture,
+        stopping: &CancellationToken,
+    ) -> Result<CallToolResult> {
+        let mut started = false;
+        let result = async {
+            self.begin_pointer(point, size).await?;
+            self.move_pointer(point.x, point.y).await?;
+            self.capture.require_uninterrupted(&self.runtime).await?;
+            let link = self.capture.link_interrupted();
+            let button = button.evdev();
+            // Avoid sending an unrelated second click if the compositor or graph query stalls.
+            let double_click_deadline = Instant::now() + Duration::from_millis(200);
+            self.mutter
+                .with_button_down(button, link.cancelled(), &mut started, async {
+                    if let ButtonGesture::Drag(end) = gesture {
+                        self.drag_path(point, end, stopping).await?;
+                    }
+                    Ok(())
+                })
+                .await?;
+            if matches!(gesture, ButtonGesture::DoubleClick) {
+                sleep(Duration::from_millis(40)).await;
+                ensure!(
+                    !stopping.is_cancelled(),
+                    "private desktop server is shutting down"
+                );
+                self.capture.require_uninterrupted(&self.runtime).await?;
+                ensure!(
+                    Instant::now() < double_click_deadline,
+                    "double-click interval elapsed before second press"
+                );
+                let interrupt = async {
+                    let _ = timeout_at(double_click_deadline, link.cancelled()).await;
+                };
+                self.mutter
+                    .with_button_down(button, interrupt, &mut started, std::future::ready(Ok(())))
+                    .await?;
+            }
+            // Observe any disconnect still in transit before acknowledging the gesture.
+            self.capture.require_uninterrupted(&self.runtime).await
+        }
+        .await;
+        if let Err(error) = result {
+            let (not_sent, uncertain) = match gesture {
+                ButtonGesture::Click => {
+                    ("Click was not sent", "The click may have been delivered.")
+                }
+                ButtonGesture::DoubleClick => (
+                    "Double-click was not sent",
+                    "The double-click may have been partially delivered.",
+                ),
+                ButtonGesture::Drag(_) => (
+                    "Drag was not sent",
+                    "The drag may have been partially delivered.",
+                ),
+            };
+            if started {
+                bail!(
+                    "{uncertain} Do not retry it. Take a new screenshot to check the result.\n{error:#}"
+                );
+            }
+            return Err(error.context(not_sent));
+        }
+        Ok(message(json!({"status":"dispatched"})))
+    }
+
+    async fn drag_path(
+        &self,
+        start: &Point,
+        end: Pixel,
+        stopping: &CancellationToken,
+    ) -> Result<()> {
+        let distance = start.x.abs_diff(end.x).max(start.y.abs_diff(end.y));
+        let steps = distance.min(12);
+        for step in 1..=steps {
+            sleep(Duration::from_millis(12)).await;
+            ensure!(
+                !stopping.is_cancelled(),
+                "private desktop server is shutting down"
+            );
+            self.capture.observed_health()?.require_ready()?;
+            let interpolate = |a: u32, b: u32| (a * (steps - step) + b * step + steps / 2) / steps;
+            self.move_pointer(interpolate(start.x, end.x), interpolate(start.y, end.y))
+                .await?;
+        }
+        Ok(())
     }
 }
 
-fn ready(desktop: &mut Option<Desktop>) -> Result<&mut Desktop> {
+fn running_desktop(desktop: &mut Option<Desktop>) -> Result<&mut Desktop> {
     let desktop = desktop
         .as_mut()
         .ok_or_else(|| anyhow!("start the private desktop first"))?;
-    desktop.check()?;
+    desktop.runtime.check()?;
     Ok(desktop)
 }
 

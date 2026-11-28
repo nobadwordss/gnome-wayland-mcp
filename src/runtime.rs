@@ -21,6 +21,10 @@ use tokio::{
 };
 
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
+
+mod capture_link;
+use capture_link::CaptureLink;
 
 const DISPLAY_NAME: &str = "mcp-wayland";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(8);
@@ -135,8 +139,8 @@ impl Runtime {
         Ok(runtime)
     }
 
-    pub fn bus_address(&self) -> &str {
-        &self.env.bus_address
+    pub fn bus_path(&self) -> PathBuf {
+        self.env.root.join("bus")
     }
 
     pub fn mutter_pid(&self) -> u32 {
@@ -171,6 +175,7 @@ impl Runtime {
             "-q",
             "pipewiresrc",
             &format!("path={node}"),
+            "on-disconnect=error",
             "!",
             "queue",
             "max-size-buffers=2",
@@ -196,28 +201,41 @@ impl Runtime {
             process.stop().await;
             bail!("open private capture pipe");
         };
-        let (tx, rx) = watch::channel(None);
-        let reader = tokio::spawn(read_pngs(output, size, tx));
-        let mut capture = Capture {
-            process,
-            reader,
-            frames: rx,
+        let (tx, mut frames) = watch::channel(None);
+        let mut reader = tokio::spawn(read_pngs(output, size, tx));
+        let open = async {
+            if frames.changed().await.is_err() {
+                let reason = match (&mut reader).await {
+                    Ok(Err(error)) => format!("{error:#}"),
+                    _ => "frame reader stopped".to_owned(),
+                };
+                bail!(
+                    "unable to open private capture stream (pipewiresrc must support on-disconnect=error): {reason}"
+                );
+            }
+            CaptureLink::bind(&self.env, node, process.pid.as_raw_nonzero().get() as u32).await
         };
         let error = match stopping
-            .run_until_cancelled(time::timeout(CAPTURE_TIMEOUT, capture.frames.changed()))
+            .run_until_cancelled(time::timeout(CAPTURE_TIMEOUT, open))
             .await
         {
-            Some(Ok(Ok(()))) => return Ok(capture),
-            Some(Ok(Err(_))) => anyhow!(
-                "unable to open private capture stream: {}",
-                capture.read_error().await
-            ),
+            Some(Ok(Ok(link))) => {
+                return Ok(Capture {
+                    process,
+                    reader,
+                    frames,
+                    link,
+                    frame_id: None,
+                });
+            }
+            Some(Ok(Err(error))) => error,
             Some(Err(_)) => {
                 anyhow!("private capture timed out; check PipeWire and GStreamer plugins")
             }
             None => anyhow!("desktop startup cancelled"),
         };
-        capture.stop().await;
+        reader.abort();
+        process.stop().await;
         Err(error)
     }
 
@@ -407,72 +425,92 @@ pub(crate) struct Capture {
     process: Process,
     reader: JoinHandle<Result<()>>,
     frames: watch::Receiver<Option<Arc<[u8]>>>,
+    link: CaptureLink,
+    /// The pointer token belongs to the stream that supplied its pixels.
+    pub frame_id: Option<Uuid>,
+}
+
+#[derive(PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CaptureHealth {
+    Ready,
+    Paused,
+    RecoveryNeeded,
+}
+
+impl CaptureHealth {
+    pub fn require_ready(self) -> Result<()> {
+        match self {
+            Self::Ready => Ok(()),
+            Self::Paused => {
+                bail!("private capture is paused; take a new screenshot after it resumes")
+            }
+            Self::RecoveryNeeded => bail!("private capture was interrupted; take a new screenshot"),
+        }
+    }
 }
 
 impl Capture {
-    pub fn check(&self) -> Result<()> {
-        self.process.check()?;
-        ensure!(
-            !self.reader.is_finished(),
-            "private capture stream closed; stop and restart the desktop"
-        );
-        Ok(())
+    pub fn link_interrupted(&self) -> &CancellationToken {
+        &self.link.interrupted
     }
 
-    pub fn was_interrupted(&self) -> Result<bool> {
-        self.check()?;
+    pub fn is_closed(&self) -> Result<bool> {
+        Ok(self.process.child.id().is_none()
+            || self.frames.has_changed().is_err()
+            || !self.process.running()?)
+    }
+
+    pub async fn health(&self, runtime: &Runtime) -> Result<CaptureHealth> {
+        if self.is_closed()? || !self.link.is_active(&runtime.env).await? {
+            return Ok(CaptureHealth::RecoveryNeeded);
+        }
+        self.observed_health()
+    }
+
+    /// Check the monitor and reader between drag steps without spawning a graph query.
+    pub fn observed_health(&self) -> Result<CaptureHealth> {
+        if self.link.interrupted.is_cancelled() || self.is_closed()? {
+            return Ok(CaptureHealth::RecoveryNeeded);
+        }
         // Leave stop/continue events waitable so an interruption remains
         // visible until this capture is replaced, even if it already resumed.
         let event = waitid(
             WaitId::Pid(self.process.pid),
-            WaitIdOptions::STOPPED
+            WaitIdOptions::EXITED
+                | WaitIdOptions::STOPPED
                 | WaitIdOptions::CONTINUED
                 | WaitIdOptions::NOHANG
                 | WaitIdOptions::NOWAIT,
         )?;
-        if let Some(event) = event {
-            ensure!(
-                event.continued(),
-                "private capture is paused; take a new screenshot after it resumes"
-            );
-            return Ok(true);
-        }
-        Ok(false)
+        Ok(match event {
+            Some(event) if event.stopped() || event.trapped() => CaptureHealth::Paused,
+            Some(_) => CaptureHealth::RecoveryNeeded,
+            None => CaptureHealth::Ready,
+        })
     }
 
-    pub fn require_uninterrupted(&self) -> Result<()> {
-        ensure!(
-            !self.was_interrupted()?,
-            "private capture was interrupted; take a new screenshot"
-        );
-        Ok(())
+    pub async fn require_uninterrupted(&self, runtime: &Runtime) -> Result<()> {
+        self.health(runtime).await?.require_ready()
     }
 
-    pub async fn screenshot(&mut self) -> Result<Arc<[u8]>> {
-        self.require_uninterrupted()?;
+    pub async fn wait_for_frame(&mut self) {
         self.frames.borrow_and_update();
-        // A static monitor may produce no new frame. The existing frame is
-        // still available while the same live stream owns its coordinates.
-        if let Ok(Err(_)) = time::timeout(FRAME_WAIT, self.frames.changed()).await {
-            let reason = self.read_error().await;
-            bail!("private capture stream closed: {reason}");
-        }
-        self.require_uninterrupted()?;
+        // A static monitor may produce no new buffer. The caller checks the link
+        // before publishing a frame, including after EOF or a timeout here.
+        let _ = time::timeout(FRAME_WAIT, self.frames.changed()).await;
+    }
+
+    pub fn latest_frame(&self) -> Result<Arc<[u8]>> {
         self.frames
-            .borrow_and_update()
+            .borrow()
             .clone()
             .context("private capture has no frame")
     }
 
-    async fn read_error(&mut self) -> String {
-        match (&mut self.reader).await {
-            Ok(Err(error)) => format!("{error:#}"),
-            _ => "frame reader stopped".to_owned(),
-        }
-    }
-
     pub async fn stop(&mut self) {
         self.reader.abort();
+        self.link.stop().await;
         self.process.stop().await;
     }
 }

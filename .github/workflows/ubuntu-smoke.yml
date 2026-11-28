@@ -22,9 +22,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            dbus-daemon gir1.2-gtk-4.0 gstreamer1.0-pipewire gstreamer1.0-plugins-base \
+            dbus-bin dbus-daemon gir1.2-gtk-4.0 gstreamer1.0-pipewire gstreamer1.0-plugins-base \
             gstreamer1.0-plugins-good gstreamer1.0-tools libgl1-mesa-dri mutter \
-            pipewire python3-gi python3-pil wireplumber
+            pipewire pipewire-bin python3-gi python3-pil wireplumber
           dpkg-query -W mutter pipewire wireplumber gstreamer1.0-tools
 
       - name: Run Rust tests
@@ -35,3 +35,9 @@ jobs:
 
       - name: Run GTK smoke test
         run: /usr/bin/python3 -B tests/headless_smoke.py target/debug/gnome-wayland-mcp
+
+      - name: Check click delivery across a capture disconnect
+        run: /usr/bin/python3 -B tests/click_disconnect.py target/debug/gnome-wayland-mcp
+
+      - name: Check double-click and drag selection and interrupted gestures
+        run: /usr/bin/python3 -B tests/pointer_gestures.py target/debug/gnome-wayland-mcp

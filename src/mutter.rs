@@ -1,8 +1,9 @@
-use std::{collections::HashMap, os::fd::OwnedFd, time::Duration};
+use std::{collections::HashMap, future::Future, os::fd::OwnedFd, path::Path, time::Duration};
 
 use anyhow::{Context, Result, anyhow, ensure};
 use futures_util::StreamExt;
 use tokio::{io::AsyncWriteExt, net::unix::pipe::Sender, sync::oneshot, task::JoinHandle, time};
+use tokio_util::sync::CancellationToken;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 use zbus::{
     Connection, Proxy,
@@ -11,6 +12,8 @@ use zbus::{
 };
 
 use crate::runtime::Size;
+
+mod guarded_input;
 
 const REMOTE_DESKTOP: &str = "org.gnome.Mutter.RemoteDesktop";
 const REMOTE_DESKTOP_PATH: &str = "/org/gnome/Mutter/RemoteDesktop";
@@ -58,15 +61,10 @@ struct ClipboardTask {
 }
 
 impl Mutter {
-    pub async fn connect(address: &str, pid: u32, size: Size) -> Result<Self> {
-        let connection = time::timeout(
-            DBUS_TIMEOUT,
-            zbus::connection::Builder::address(address)?
-                .method_timeout(DBUS_TIMEOUT)
-                .build(),
-        )
-        .await
-        .context("connect to private D-Bus")??;
+    pub async fn connect(bus_path: &Path, pid: u32, size: Size) -> Result<Self> {
+        let connection = time::timeout(DBUS_TIMEOUT, guarded_input::connect(bus_path))
+            .await
+            .context("connect to private D-Bus")??;
         let owner = verify_owner(&connection, pid).await?;
         let remote = Proxy::new(
             &connection,
@@ -158,30 +156,53 @@ impl Mutter {
         .await?)
     }
 
-    pub async fn move_pointer(&self, x: u32, y: u32) -> Result<()> {
-        self.remote()
-            .await?
-            .call(
-                "NotifyPointerMotionAbsolute",
-                &(
-                    self.stream_path.as_str(),
-                    f64::from(x) + 0.5,
-                    f64::from(y) + 0.5,
-                ),
-            )
-            .await
-            .context("move private pointer")
+    pub async fn move_pointer(
+        &self,
+        x: u32,
+        y: u32,
+        interrupted: Option<&CancellationToken>,
+    ) -> Result<()> {
+        let remote = self.remote().await?;
+        let args = (
+            self.stream_path.as_str(),
+            f64::from(x) + 0.5,
+            f64::from(y) + 0.5,
+        );
+        let motion = remote.call("NotifyPointerMotionAbsolute", &args);
+        match interrupted {
+            Some(token) => guarded_input::send(token.cancelled(), motion).await.1,
+            None => motion.await,
+        }
+        .context("move private pointer")
     }
 
-    pub async fn click(&self, button: i32) -> Result<()> {
+    pub async fn with_button_down(
+        &self,
+        button: i32,
+        interrupted: impl Future<Output = ()>,
+        any_press_started: &mut bool,
+        while_held: impl Future<Output = Result<()>>,
+    ) -> Result<()> {
         let remote = self.remote().await?;
-        let press = remote
-            .call::<_, _, ()>("NotifyPointerButton", &(button, true))
-            .await;
+        let (started, press) = guarded_input::send(
+            interrupted,
+            remote.call("NotifyPointerButton", &(button, true)),
+        )
+        .await;
+        if !started && press.is_err() {
+            return press.context("send private button press");
+        }
+        *any_press_started = true;
+        let action = match press {
+            Ok(()) => while_held.await,
+            Err(error) => Err(error.into()),
+        };
+        // Always attempt release after a possible press, including on motion failure.
         let release = remote
             .call::<_, _, ()>("NotifyPointerButton", &(button, false))
-            .await;
-        press.and(release).context("send private pointer click")
+            .await
+            .context("release private pointer button");
+        release.and(action)
     }
 
     pub async fn scroll(&self, horizontal: i32, vertical: i32) -> Result<()> {
@@ -207,7 +228,8 @@ impl Mutter {
     pub async fn prepare_input(&self, size: Size) -> Result<()> {
         // The first notifications create virtual devices in Mutter. Warm them
         // here, before the configured application starts receiving input.
-        self.move_pointer(size.width / 2, size.height / 2).await?;
+        self.move_pointer(size.width / 2, size.height / 2, None)
+            .await?;
         self.key(0xffe1, &[]).await // Shift_L
     }
 
