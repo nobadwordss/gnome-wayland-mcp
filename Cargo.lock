@@ -487,6 +487,7 @@ name = "gnome-wayland-mcp"
 version = "0.2.6"
 dependencies = [
  "anyhow",
+ "async-trait",
  "base64",
  "clap",
  "futures-util",

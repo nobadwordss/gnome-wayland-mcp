@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rmcp::{
     ServerHandler,
@@ -16,8 +16,8 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
-    mutter::Mutter,
-    runtime::{Capture, Process, Program, Runtime, Size},
+    mutter::{CLICK_NOT_SENT, CLICK_UNCERTAIN, Mutter},
+    runtime::{Capture, CaptureHealth, Process, Program, Runtime, Size},
 };
 
 #[derive(Clone)]
@@ -37,7 +37,6 @@ struct Desktop {
     capture: Capture,
     mutter: Mutter,
     runtime: Runtime,
-    frame: Option<Uuid>,
 }
 
 #[derive(Serialize)]
@@ -239,7 +238,7 @@ impl Server {
     }
 
     #[tool(
-        description = "Report the private desktop and application status, including the app's exit code or signal after termination.",
+        description = "Report the private desktop, application and capture status, including the app's exit code or signal after termination.",
         annotations(open_world_hint = false, read_only_hint = true)
     )]
     async fn desktop_status(&self) -> CallToolResult {
@@ -325,67 +324,85 @@ impl State {
         let size = self.size;
         match action {
             Action::Start => {
-                if let Some(desktop) = &mut self.desktop {
-                    if desktop.check().is_ok() {
-                        return Ok(message(self.status(false)?));
-                    }
+                if let Some(desktop) = self.desktop.as_mut().filter(|d| d.runtime.check().is_ok()) {
+                    desktop.recover_capture(size, stopping).await?;
+                } else {
                     self.stop().await;
+                    self.desktop = Some(Desktop::start(size, stopping).await?);
                 }
-                self.desktop = Some(Desktop::start(size, stopping).await?);
-                Ok(message(self.status(false)?))
+                Ok(message(self.status(false).await?))
             }
             Action::Stop => {
                 self.stop().await;
-                Ok(message(self.status(false)?))
+                Ok(message(self.status(false).await?))
             }
-            Action::Status => Ok(message(self.status(true)?)),
+            Action::Status => Ok(message(self.status(true).await?)),
             Action::Launch => {
                 let program = self.program.as_ref().ok_or_else(|| {
                     anyhow!("configure an application in the server arguments after --")
                 })?;
-                let desktop = ready(&mut self.desktop)?;
+                let desktop = running_desktop(&mut self.desktop)?;
                 if !desktop.app_running()? {
-                    desktop.frame = None;
+                    desktop.capture.frame_id = None;
                     desktop.application = Some(desktop.runtime.launch(program)?);
                 }
-                Ok(message(self.status(false)?))
+                Ok(message(self.status(false).await?))
             }
             Action::Screenshot => {
-                let desktop = ready(&mut self.desktop)?;
-                desktop.frame = None;
-                if desktop.capture.was_interrupted()? {
-                    // Open a new reader rather than trusting any PNG still
-                    // buffered in the interrupted pipeline.
-                    let capture = desktop
-                        .runtime
-                        .start_capture(desktop.mutter.node, size, stopping)
-                        .await?;
-                    let mut old = std::mem::replace(&mut desktop.capture, capture);
-                    old.stop().await;
-                }
-                let png = desktop.capture.screenshot().await?;
+                let desktop = running_desktop(&mut self.desktop)?;
+                desktop.capture.frame_id = None;
+                desktop.capture.wait_for_frame().await;
+                desktop
+                    .recover_capture(size, stopping)
+                    .await?
+                    .require_ready()?;
+                let png = desktop.capture.latest_frame()?;
+                let image = ContentBlock::image(STANDARD.encode(png), "image/png");
+                desktop
+                    .capture
+                    .require_uninterrupted(&desktop.runtime)
+                    .await?;
                 let frame_id = Uuid::new_v4();
-                desktop.frame = Some(frame_id);
+                desktop.capture.frame_id = Some(frame_id);
                 let metadata = json!({"frame_id":frame_id.to_string(), "width":size.width, "height":size.height});
                 Ok(CallToolResult::success(vec![
                     ContentBlock::text(metadata.to_string()),
-                    ContentBlock::image(STANDARD.encode(png), "image/png"),
+                    image,
                 ]))
             }
             Action::Move(point) => {
-                let desktop = ready(&mut self.desktop)?;
-                desktop.begin_pointer(&point, size)?;
+                let desktop = running_desktop(&mut self.desktop)?;
+                desktop.begin_pointer(&point, size).await?;
                 dispatched(desktop.mutter.move_pointer(point.x, point.y).await)
             }
             Action::Click(Click { point, button }) => {
-                let desktop = ready(&mut self.desktop)?;
-                desktop.begin_pointer(&point, size)?;
-                let result = async {
-                    desktop.mutter.move_pointer(point.x, point.y).await?;
-                    desktop.mutter.click(button.evdev()).await
-                }
-                .await;
-                dispatched(result)
+                let desktop = running_desktop(&mut self.desktop)?;
+                desktop
+                    .begin_pointer(&point, size)
+                    .await
+                    .context(CLICK_NOT_SENT)?;
+                desktop
+                    .mutter
+                    .move_pointer(point.x, point.y)
+                    .await
+                    .context(CLICK_NOT_SENT)?;
+                desktop
+                    .capture
+                    .require_uninterrupted(&desktop.runtime)
+                    .await
+                    .context(CLICK_NOT_SENT)?;
+                desktop
+                    .mutter
+                    .click(button.evdev(), desktop.capture.link_interrupted())
+                    .await?;
+                // The fresh query also covers disconnect notices still in transit.
+                let health = desktop
+                    .capture
+                    .health(&desktop.runtime)
+                    .await
+                    .context(CLICK_UNCERTAIN)?;
+                ensure!(health == CaptureHealth::Ready, CLICK_UNCERTAIN);
+                Ok(message(json!({"status":"dispatched"})))
             }
             Action::Scroll(Scroll {
                 point,
@@ -398,10 +415,14 @@ impl State {
                         && (horizontal != 0 || vertical != 0),
                     "scroll requires a nonzero step count from -20 to 20"
                 );
-                let desktop = ready(&mut self.desktop)?;
-                desktop.begin_pointer(&point, size)?;
+                let desktop = running_desktop(&mut self.desktop)?;
+                desktop.begin_pointer(&point, size).await?;
                 let result = async {
                     desktop.mutter.move_pointer(point.x, point.y).await?;
+                    desktop
+                        .capture
+                        .require_uninterrupted(&desktop.runtime)
+                        .await?;
                     desktop.mutter.scroll(horizontal, vertical).await
                 }
                 .await;
@@ -409,8 +430,8 @@ impl State {
             }
             Action::Key(key) => {
                 let (keysym, modifiers) = key.validate()?;
-                let desktop = ready(&mut self.desktop)?;
-                desktop.frame = None;
+                let desktop = running_desktop(&mut self.desktop)?;
+                desktop.begin_keyboard_input()?;
                 dispatched(desktop.mutter.key(keysym, &modifiers).await)
             }
             Action::Paste(Text {
@@ -421,8 +442,8 @@ impl State {
                     (1..=16_384).contains(&text.len()) && !text.contains('\0'),
                     "text must be 1 to 16,384 UTF-8 bytes without NUL characters"
                 );
-                let desktop = ready(&mut self.desktop)?;
-                desktop.frame = None;
+                let desktop = running_desktop(&mut self.desktop)?;
+                desktop.begin_keyboard_input()?;
                 let modifiers: &[u32] = match paste_shortcut.unwrap_or_default() {
                     PasteShortcut::CtrlV => &[Modifier::Ctrl.evdev()],
                     PasteShortcut::CtrlShiftV => &[Modifier::Ctrl.evdev(), Modifier::Shift.evdev()],
@@ -432,22 +453,26 @@ impl State {
         }
     }
 
-    fn status(&self, include_application: bool) -> Result<Value> {
-        let mut state = match &self.desktop {
-            Some(desktop) if desktop.check().is_err() => "failed",
+    async fn status(&self, detailed: bool) -> Result<Value> {
+        let application = self.application_status()?;
+        let state = match &self.desktop {
+            Some(desktop) if desktop.runtime.check().is_err() => "failed",
+            Some(_) if matches!(application, ApplicationStatus::Running) => "application_running",
             Some(_) => "desktop_running",
             None => "stopped",
         };
-        let application = (include_application || state == "desktop_running")
-            .then(|| self.application_status())
-            .transpose()?;
-        if state == "desktop_running" && matches!(application, Some(ApplicationStatus::Running)) {
-            state = "application_running";
-        }
         let mut status = json!({ "status": state, "mode": "headless", "application_configured": self.program.is_some(),
             "width": self.size.width, "height": self.size.height });
-        if include_application {
+        if detailed {
             status["application"] = json!(application);
+            status["capture"] = match &self.desktop {
+                None => json!({"status": "stopped"}),
+                Some(_) if state == "failed" => json!({"status": "unavailable"}),
+                Some(desktop) => match desktop.capture.health(&desktop.runtime).await {
+                    Ok(health) => json!({"status": health}),
+                    Err(error) => json!({"status": "unknown", "error": format!("{error:#}")}),
+                },
+            };
         }
         Ok(status)
     }
@@ -491,7 +516,7 @@ impl Desktop {
         let startup = async {
             let mutter = stopping
                 .run_until_cancelled(Mutter::connect(
-                    runtime.bus_address(),
+                    &runtime.bus_path(),
                     runtime.mutter_pid(),
                     size,
                 ))
@@ -516,7 +541,6 @@ impl Desktop {
                 capture,
                 mutter,
                 runtime,
-                frame: None,
             }),
             Err(error) => {
                 runtime.stop().await;
@@ -525,9 +549,23 @@ impl Desktop {
         }
     }
 
-    fn check(&self) -> Result<()> {
-        self.runtime.check()?;
-        self.capture.check()
+    async fn recover_capture(
+        &mut self,
+        size: Size,
+        stopping: &CancellationToken,
+    ) -> Result<CaptureHealth> {
+        let health = self.capture.health(&self.runtime).await?;
+        if health != CaptureHealth::RecoveryNeeded {
+            return Ok(health);
+        }
+        // A disconnected reader can still hold PipeWire buffers until it is reaped.
+        self.capture.frame_id = None;
+        self.capture.stop().await;
+        self.capture = self
+            .runtime
+            .start_capture(self.mutter.node, size, stopping)
+            .await?;
+        Ok(CaptureHealth::Ready)
     }
 
     fn app_running(&self) -> Result<bool> {
@@ -537,26 +575,35 @@ impl Desktop {
         }
     }
 
-    fn begin_pointer(&mut self, point: &Point, size: Size) -> Result<()> {
+    fn begin_keyboard_input(&mut self) -> Result<()> {
+        ensure!(
+            !self.capture.is_closed()?,
+            "private capture stream closed; take a new screenshot"
+        );
+        self.capture.frame_id = None;
+        Ok(())
+    }
+
+    async fn begin_pointer(&mut self, point: &Point, size: Size) -> Result<()> {
         let frame = Uuid::parse_str(&point.frame_id).ok();
         ensure!(
-            self.frame.is_some() && frame == self.frame,
+            self.capture.frame_id.is_some() && frame == self.capture.frame_id,
             "frame_id is stale or unknown; take a new screenshot"
         );
         ensure!(
             point.x < size.width && point.y < size.height,
             "point is outside the screenshot"
         );
-        self.frame = None;
-        self.capture.require_uninterrupted()
+        self.capture.frame_id = None;
+        self.capture.require_uninterrupted(&self.runtime).await
     }
 }
 
-fn ready(desktop: &mut Option<Desktop>) -> Result<&mut Desktop> {
+fn running_desktop(desktop: &mut Option<Desktop>) -> Result<&mut Desktop> {
     let desktop = desktop
         .as_mut()
         .ok_or_else(|| anyhow!("start the private desktop first"))?;
-    desktop.check()?;
+    desktop.runtime.check()?;
     Ok(desktop)
 }
 

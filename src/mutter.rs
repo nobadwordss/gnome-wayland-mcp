@@ -1,8 +1,9 @@
-use std::{collections::HashMap, os::fd::OwnedFd, time::Duration};
+use std::{collections::HashMap, os::fd::OwnedFd, path::Path, time::Duration};
 
 use anyhow::{Context, Result, anyhow, ensure};
 use futures_util::StreamExt;
 use tokio::{io::AsyncWriteExt, net::unix::pipe::Sender, sync::oneshot, task::JoinHandle, time};
+use tokio_util::sync::CancellationToken;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 use zbus::{
     Connection, Proxy,
@@ -11,6 +12,11 @@ use zbus::{
 };
 
 use crate::runtime::Size;
+
+mod button_press;
+
+pub(crate) const CLICK_UNCERTAIN: &str = "The click may have been delivered. Do not retry it. Take a new screenshot to check the result.";
+pub(crate) const CLICK_NOT_SENT: &str = "Click was not sent";
 
 const REMOTE_DESKTOP: &str = "org.gnome.Mutter.RemoteDesktop";
 const REMOTE_DESKTOP_PATH: &str = "/org/gnome/Mutter/RemoteDesktop";
@@ -58,15 +64,10 @@ struct ClipboardTask {
 }
 
 impl Mutter {
-    pub async fn connect(address: &str, pid: u32, size: Size) -> Result<Self> {
-        let connection = time::timeout(
-            DBUS_TIMEOUT,
-            zbus::connection::Builder::address(address)?
-                .method_timeout(DBUS_TIMEOUT)
-                .build(),
-        )
-        .await
-        .context("connect to private D-Bus")??;
+    pub async fn connect(bus_path: &Path, pid: u32, size: Size) -> Result<Self> {
+        let connection = time::timeout(DBUS_TIMEOUT, button_press::connect(bus_path))
+            .await
+            .context("connect to private D-Bus")??;
         let owner = verify_owner(&connection, pid).await?;
         let remote = Proxy::new(
             &connection,
@@ -173,15 +174,21 @@ impl Mutter {
             .context("move private pointer")
     }
 
-    pub async fn click(&self, button: i32) -> Result<()> {
-        let remote = self.remote().await?;
-        let press = remote
-            .call::<_, _, ()>("NotifyPointerButton", &(button, true))
-            .await;
+    pub async fn click(&self, button: i32, interrupted: &CancellationToken) -> Result<()> {
+        let remote = self.remote().await.context(CLICK_NOT_SENT)?;
+        let (started, press) = button_press::send(
+            interrupted,
+            remote.call("NotifyPointerButton", &(button, true)),
+        )
+        .await;
+        if !started && press.is_err() {
+            return press.context(CLICK_NOT_SENT);
+        }
+        // Once the first byte was written, finish the pair even on loss or a missing reply.
         let release = remote
             .call::<_, _, ()>("NotifyPointerButton", &(button, false))
             .await;
-        press.and(release).context("send private pointer click")
+        press.and(release).context(CLICK_UNCERTAIN)
     }
 
     pub async fn scroll(&self, horizontal: i32, vertical: i32) -> Result<()> {

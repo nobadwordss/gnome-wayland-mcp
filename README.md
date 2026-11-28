@@ -17,7 +17,7 @@ Test native Linux GUI apps with an MCP agent on a separate GNOME Wayland display
 Use a Linux host with Mutter, D-Bus, PipeWire, WirePlumber 0.5 or later, and GStreamer installed under `/usr/bin`. The examples use GNOME Text Editor. On Fedora, install any missing runtime dependencies with the following command.
 
 ```sh
-sudo dnf install mutter dbus-daemon pipewire wireplumber gstreamer1 \
+sudo dnf install mutter dbus-daemon pipewire pipewire-utils wireplumber gstreamer1 \
   pipewire-gstreamer gstreamer1-plugins-base gstreamer1-plugins-good gnome-text-editor
 ```
 
@@ -25,7 +25,7 @@ On Ubuntu 26.04 LTS, install the distribution packages below. Mutter and GNOME T
 
 ```sh
 sudo apt update
-sudo apt install curl mutter dbus-daemon pipewire wireplumber libgl1-mesa-dri \
+sudo apt install curl mutter dbus-daemon pipewire pipewire-bin wireplumber libgl1-mesa-dri \
   gstreamer1.0-tools gstreamer1.0-pipewire gstreamer1.0-plugins-base \
   gstreamer1.0-plugins-good gnome-text-editor
 ```
@@ -273,7 +273,7 @@ The Ubuntu VM used the archive's Chromium sandbox helper with Ubuntu's default A
 | Tool | What it does |
 | --- | --- |
 | `desktop_start` | Starts a private Mutter desktop with one virtual monitor. |
-| `desktop_status` | Reports desktop and application status. |
+| `desktop_status` | Reports desktop, application and capture status (see below). |
 | `launch_app` | Starts the app specified in the server's arguments. |
 | `screenshot` | Returns a PNG and its `frame_id`, `width`, and `height`. |
 | `mouse_move` | Moves the pointer to `{frame_id, x, y}`. |
@@ -284,6 +284,8 @@ The Ubuntu VM used the archive's Chromium sandbox helper with Ubuntu's default A
 | `desktop_stop` | Stops the desktop and the running app. |
 
 `desktop_status` includes an `application` object. Its `status` is `not_configured` when the server has no app command, `not_started` when a configured app has yet to launch in the current session, `running` while the app process is alive, or `exited` when it has terminated. For `exited`, the object includes `exit_code` for a process exit (including `0`) or `signal` for the Linux signal number. A successful relaunch replaces the previous process status, and stopping the desktop resets it. Use a screenshot to verify that a running process has opened its window.
+
+Builds from this checkout also report `capture.status`. A running desktop can have a `ready`, `paused`, or `recovery_needed` capture. A stopped desktop reports `stopped`. If a desktop service has failed, capture is `unavailable`. If the server cannot inspect the capture, it reports `unknown` with an error. Checking status neither starts nor replaces a capture.
 
 Screenshot coordinates start at the top-left pixel. Each pointer action uses the current `frame_id`. A new screenshot, app launch, or input invalidates earlier IDs. A `dispatched` response confirms delivery to Mutter. For `type_text`, Mutter also acknowledges a clipboard transfer and can request the text for its own clipboard cache. Use a fresh screenshot to verify that the app inserted the text before pressing Enter or replacing the clipboard with another `type_text` call.
 
@@ -296,6 +298,10 @@ The private desktop owns its Wayland socket, D-Bus, PipeWire, keyboard focus, an
 The runtime uses the installed Mutter executable directly. The private display and input are separate from your regular session. Apps run with the invoking user's OS permissions and can access files and the network as that user.
 
 Each MCP server process keeps at most one private desktop. Repeated `desktop_start` calls reuse a healthy desktop. Separate server processes can each own a desktop, and an idle server keeps its desktop until it receives a stop or shutdown request.
+
+In builds from this checkout, `screenshot` and `desktop_start` can replace a disconnected capture on the same Mutter stream. The first recovered screenshot uses a complete PNG from the new capture. The desktop and app keep running. A paused capture can recover after it resumes. `launch_app` uses the running desktop even while capture needs recovery. If the capture reader has closed, take a new screenshot before sending keys or pasting.
+
+In these builds, the server also checks the original capture link's serial and active state before issuing a `frame_id` or sending pointer input. It watches that link with `pw-dump --monitor`. If MCP detects a disconnect before it starts writing a button press to D-Bus, it rejects the click. If it detects the loss after transmission starts and before the tool replies, it finishes the button release and reports that the click may have been delivered. It sends no second click. Check the result with a fresh screenshot.
 
 Use `desktop_stop` to release the desktop while the MCP client is open, then check for `stopped` with `desktop_status`. The server stops its app and desktop services and removes the temporary runtime directory. Cleanup also runs on stdio EOF, `SIGINT`, or `SIGTERM`. A separate worker owns the desktop and runs cleanup if the client terminates the MCP launcher abruptly. Shutdown interrupts desktop startup and waits for any services already launched to exit before removing the runtime directory. A forced kill of the worker itself can leave processes and runtime files behind. App descendants that leave the managed process group can outlive the session.
 
